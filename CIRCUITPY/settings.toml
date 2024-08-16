@@ -1,0 +1,16 @@
+
+# Wi-Fi Configuration
+CIRCUITPY_WIFI_SSID = "your_wifi_ssid"
+CIRCUITPY_WIFI_PASSWORD = "your_wifi_password"
+
+# API Configuration
+API_BASE_URL = "https://api.aladhan.com/v1/"
+
+# Location Configuration
+LATITUDE = "your_latitude"
+LONGITUDE = "your_longitude"
+TIMEZONE = "your_timezone"  # e.g., "America/Montreal"
+
+# Date and Time Configuration
+DATE_FORMAT = "YYYY-MM-DD"   # e.g., "YYYY-MM-DD" or "DD-MM-YYYY"
+TIME_FORMAT = "24H"          # Options: "24H" or "12H"
