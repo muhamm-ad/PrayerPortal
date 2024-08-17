@@ -29,7 +29,7 @@ logger.setLevel(logging.INFO)
 logger.addHandler(handler)
 
 if mounted:
-    logger.info("Root filesystem mounted\n")
+    logger.info("Root filesystem mounted")
 else:
     logger.warning("Failed to mount the root filesystem")
 
@@ -54,32 +54,32 @@ requests = adafruit_requests.Session(pool, ssl_context)
 
 
 def connect_to_ap():
-    logger.info(f"Connecting to Wi-Fi {SECRETS['ssid']} ...\n")
+    logger.info(f"Connecting to Wi-Fi {SECRETS['ssid']} ... ")
     try:
         esp.connect_AP(SECRETS["ssid"], SECRETS["password"])
     except OSError:
-        logger.warning(f"Retrying connection to {SECRETS['ssid']}...\n")
+        logger.warning(f"Retrying connection to {SECRETS['ssid']} ... ")
         try:
             esp.connect_AP(SECRETS["ssid"], SECRETS["password"])
         except OSError as e2:
-            logger.error(f"Failed to connect to {SECRETS['ssid']}: {e2}\n")
+            logger.error(f"Failed to connect to {SECRETS['ssid']}: {e2} ")
             raise
-    logger.info(f"Connected to {esp.ap_info.ssid} with RSSI: {esp.ap_info.rssi}\n")
-    # logger.info(f"My IP address is {esp.ipv4_address}\n")
+    logger.info(f"Connected to {esp.ap_info.ssid} with RSSI: {esp.ap_info.rssi} ")
+    # logger.info(f"My IP address is {esp.ipv4_address} ")
 
 
 def disconnect_from_ap():
-    logger.info(f"Disconnecting from Wi-Fi {SECRETS['ssid']}...\n")
+    logger.info(f"Disconnecting from Wi-Fi {SECRETS['ssid']} ... ")
     try:
         esp.disconnect()
-        logger.info("Disconnected from Wi-Fi successfully.\n")
+        logger.info("Disconnected from Wi-Fi successfully ")
     except Exception as e:
-        logger.error(f"Failed to disconnect from Wi-Fi: {e}\n")
+        logger.error(f"Failed to disconnect from Wi-Fi: {e} ")
         raise
 
 def fetch_and_set_rtc() -> adafruit_datetime.datetime:
     word_time_api_link = "http://worldtimeapi.org/api/ip"
-    logger.info(f"Fetching time from {word_time_api_link}\n")
+    logger.info(f"Fetching time from {word_time_api_link} ")
 
     try:
         response = requests.get(word_time_api_link)
@@ -92,11 +92,11 @@ def fetch_and_set_rtc() -> adafruit_datetime.datetime:
 
         # Set the RTC
         rtc.RTC().datetime = parsed_time.timetuple()
-        logger.info(f"RTC has been set to {parsed_time}\n")
+        logger.info(f"RTC has been set to {parsed_time} ")
         return parsed_time
 
     except Exception as e:
-        logger.error(f"Error fetching or setting time: {e}\n")
+        logger.error(f"Error fetching or setting time: {e} ")
         raise
 
 
@@ -111,22 +111,21 @@ def fetch_prayer_times():
     calendar_type = getenv("API_CALENDAR_TYPE", "calendarByCity")
 
     try:
-        if state:
-            logger.info(f"Fetching prayer times for {city}, {state}, {country} for {month}/{year} using method {method}\n")
-            url = f"{base_url}{calendar_type}/{year}/{month}?country={country}&state={state}&city={city}&method={method}"
-        else:
-            logger.info(f"Fetching prayer times for {city}, {country} for {month}/{year} using method {method}\n")
-            url = f"{base_url}{calendar_type}/{year}/{month}?country={country}&city={city}&method={method}"
+        logger.info(f"Fetching prayer times for {city}, {(' ' + state + ',') if state else ''} {country} for {month}/{year} using method {method} ")
+        url = f"{base_url}{calendar_type}/{year}/{month}?country={country}&city={city}&method={method}"
 
-        logger.info(f"URL: {url}\n")
+        if state:
+            url += f"&state={state}"
+
+        logger.info(f"URL: {url}. ")
 
         response = requests.get(url=url)
         data = response.json()
         response.close()
-        logger.info("Prayer times fetched successfully!\n")
+        logger.info("Prayer times fetched successfully!. ")
         return data
     except Exception as e:
-        logger.error(f"Failed to fetch prayer times: {e}\n")
+        logger.error(f"Failed to fetch prayer times: {e}. ")
         raise
 
 
