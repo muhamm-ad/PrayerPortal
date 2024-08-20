@@ -1,5 +1,6 @@
 import time
 from os import getenv
+import gc
 
 import adafruit_connection_manager
 import adafruit_datetime
@@ -251,7 +252,13 @@ while True:
             if today_date.day == 1:
                 logger.warning("End of the month detected. ")
                 connect_to_wifi()
+                logger.info(f"Free memory: {gc.mem_free()} bytes ")
+                logger.info("Deleting prayer_dict ...")
+                del prayer_dict
+                gc.collect()
+                logger.info(f"Free memory: {gc.mem_free()} bytes ")
                 prayer_dict = fetch_prayer_times(today_date)
+                logger.info(f"Free memory: {gc.mem_free()} bytes ")
                 disconnect_from_wifi()
 
             today_timings = None
