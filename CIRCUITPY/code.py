@@ -75,7 +75,7 @@ LABEL_SPACING = 8
 
 ADHAN_MINUTES_BEFORE_PRAYER = 5
 ADHANS = {
-    "Fadjr": "/sd/adhans/AhmadAlNafees.wav",
+    "Fajr": "/sd/adhans/AhmadAlNafees.wav",
     "Dhuhr": "/sd/adhans/HafizMustafaOzcan.wav",
     "Asr": "/sd/adhans/MasjidAlHaramMecca.wav",
     "Maghrib": "/sd/adhans/MisharyRashidAlafasy.wav",
@@ -176,8 +176,7 @@ def create_prayer_group(x_position, prayer_name, prayer_time="12:00"):
     group.append(prayer_rect)
 
     # Add the icon image group
-    icon_group = displayio.Group(scale=1, x=(
-                                                    PRAYER_WIDTH - PRAYER_ICON_SIZE) // 2, y=0)
+    icon_group = displayio.Group(scale=1, x=(PRAYER_WIDTH - PRAYER_ICON_SIZE) // 2, y=0)
     set_image(icon_group, "/images/" + prayer_name + ".bmp")
     group.append(icon_group)
 
@@ -206,13 +205,13 @@ def create_prayer_group(x_position, prayer_name, prayer_time="12:00"):
     time_label = Label(
         y=time_label_y,
         font=font,
-        text=prayer_time,
+        # text=prayer_time,
         color=WHITE
     )
-    time_label.x = (PRAYER_WIDTH - time_label.bounding_box[2]) // 2
+    # time_label.x = (PRAYER_WIDTH - time_label.bounding_box[2]) // 2
     group.append(time_label)
 
-    return group
+    return group, time_label
 
 
 def connect_to_wifi():
@@ -386,10 +385,12 @@ bg_group = displayio.Group(scale=1, x=0, y=0)
 set_image(bg_group, "/images/bg.bmp")
 splash.append(bg_group)
 
-# Create and append each prayer group to the splash display
-for i, prayer in enumerate(["Fadjr", "Dhuhr", "Asr", "Maghrib", "Isha"]):
-    g = create_prayer_group(x_position=(i * PRAYER_WIDTH), prayer_name=prayer)
-    splash.append(g)
+# Initialize the display with empty prayer groups
+time_labels = {}
+for i, prayer in enumerate(["Fajr", "Dhuhr", "Asr", "Maghrib", "Isha"]):
+    group, time_label = create_prayer_group(x_position=(i * PRAYER_WIDTH), prayer_name=prayer)
+    splash.append(group)
+    time_labels[prayer] = time_label  # Store the time label for later updates
 
 today_timings = None
 next_prayer = None
@@ -414,6 +415,8 @@ while True:
 
             for p in ["Fajr", "Dhuhr", "Asr", "Maghrib", "Isha"]:
                 logger.info(f"{p}: {today_timings[p]}{', ' if p != 'Isha' else ''} ")
+                time_labels[p].text = today_timings[p]  # Update the time label text
+                time_labels[p].x = (PRAYER_WIDTH - time_labels[p].bounding_box[2]) // 2  # Recenter the text
 
     if all_prayers_passed:
         all_prayers_passed = False
@@ -469,8 +472,8 @@ while True:
             time_until_next_prayer = (next_prayer_time.hour * 60 + next_prayer_time.minute) * 60 - \
                                      (current_time.hour * 60 + current_time.minute) * 60 - current_time.second
 
-        time_until_next_adhan = time_until_next_prayer - (ADHAN_MINUTES_BEFORE_PRAYER * 60)
+        time_until_next_adhan = time_until_next_prayer - (ADHAN_MINUTES_BEFORE_PRAYER * 60) # FIXME : can be negative
         logger.info(f"RTC: {adafruit_datetime.datetime.now()} ")
         logger.info(f"Time until next adhan: {time_until_next_adhan} seconds ")
         logger.info(f"Time until next prayer: {time_until_next_prayer} seconds ")
-        time.sleep(time_until_next_adhan)
+        time.sleep(time_until_next_adhan if time_until_next_adhan > 0 else 0)
