@@ -32,7 +32,6 @@ pyportal = PyPortal(
     status_neopixel=board.NEOPIXEL,
     text_wrap=True,
     esp=esp
-    # debug=True
 )
 
 try:
@@ -107,18 +106,6 @@ if SECRETS["ssid"] is None or SECRETS["password"] is None:
 
 
 # ------------- Functions ------------- #
-# Backlight function
-# Value between 0 and 1 where 0 is OFF, 0.5 is 50% and 1 is 100% brightness.
-def set_backlight(val):
-    val = max(0, min(1.0, val))
-    try:
-        board.DISPLAY.auto_brightness = False
-    except AttributeError:
-        pass
-    board.DISPLAY.brightness = val
-
-
-# This will handle switching Images and Icons
 def set_image(group, filename):
     """Set the image file for a given goup for display.
     This is most useful for Icons or image slideshows.
@@ -138,80 +125,6 @@ def set_image(group, filename):
     image_sprite = displayio.TileGrid(image, pixel_shader=image.pixel_shader)
 
     group.append(image_sprite)
-
-
-# return a reformatted string with word wrapping using PyPortal.wrap_nicely
-def text_box(target, top, string, max_chars):
-    text = pyportal.wrap_nicely(string, max_chars)
-    new_text = ""
-    test = ""
-
-    for w in text:
-        new_text += "\n" + w
-        test += "M\n"
-
-    text_height = Label(font, text="M", color=0x03AD31)
-    text_height.text = test  # Odd things happen without this
-    glyph_box = text_height.bounding_box
-    target.text = ""  # Odd things happen without this
-    target.y = int(glyph_box[3] / 2) + top
-    target.text = new_text
-
-
-def create_prayer_group(x_position, prayer_name, prayer_time="12:00"):
-    group = displayio.Group(scale=1, x=x_position, y=PRAYER_Y_POSITION)
-
-    # Calculate dimensions
-    prayer_label_y = PRAYER_ICON_SIZE + LABEL_SPACING
-    total_label_height = PRAYER_ICON_SIZE + (prayer_label_y // 2)
-
-    # Create the rectangle with a white stroke for the icon and label
-    prayer_rect = Rect(
-        x=0,
-        y=0,
-        width=PRAYER_WIDTH,
-        height=total_label_height,
-        outline=WHITE
-    )
-    group.append(prayer_rect)
-
-    # Add the icon image group
-    icon_group = displayio.Group(scale=1, x=(PRAYER_WIDTH - PRAYER_ICON_SIZE) // 2, y=0)
-    set_image(icon_group, "/images/" + prayer_name + ".bmp")
-    group.append(icon_group)
-
-    # Create the prayer label
-    prayer_label = Label(
-        y=prayer_label_y,
-        font=font,
-        text=prayer_name,
-        color=WHITE
-    )
-    prayer_label.x = (PRAYER_WIDTH - prayer_label.bounding_box[2]) // 2
-    group.append(prayer_label)
-
-    # Create the rectangle with a white stroke for the time label
-    time_rect = Rect(
-        x=0,
-        y=total_label_height,
-        width=PRAYER_WIDTH,
-        height=PRAYER_HEIGHT - total_label_height,
-        outline=WHITE
-    )
-    group.append(time_rect)
-
-    # Create the time label
-    time_label_y = total_label_height + LABEL_SPACING * 2
-    time_label = Label(
-        y=time_label_y,
-        font=font,
-        # text=prayer_time,
-        color=WHITE
-    )
-    # time_label.x = (PRAYER_WIDTH - time_label.bounding_box[2]) // 2
-    group.append(time_label)
-
-    return group, time_label
 
 
 def connect_to_wifi():
@@ -369,6 +282,59 @@ def get_next_day(date_obj: adafruit_datetime.date) -> adafruit_datetime.date:
             return adafruit_datetime.date(year=date_obj.year, month=date_obj.month + 1, day=1)
 
 
+def create_prayer_group(x_position, prayer_name):
+    result_group = displayio.Group(scale=1, x=x_position, y=PRAYER_Y_POSITION)
+
+    # Calculate dimensions
+    prayer_label_y = PRAYER_ICON_SIZE + LABEL_SPACING
+    total_label_height = PRAYER_ICON_SIZE + (prayer_label_y // 2)
+
+    # Create the rectangle with a white stroke for the icon and label
+    prayer_rect = Rect(
+        x=0,
+        y=0,
+        width=PRAYER_WIDTH,
+        height=total_label_height,
+        outline=WHITE
+    )
+    result_group.append(prayer_rect)
+
+    # Add the icon image group
+    icon_group = displayio.Group(scale=1, x=(PRAYER_WIDTH - PRAYER_ICON_SIZE) // 2, y=0)
+    set_image(icon_group, "/images/" + prayer_name + ".bmp")
+    result_group.append(icon_group)
+
+    # Create the prayer label
+    prayer_label = Label(
+        y=prayer_label_y,
+        font=font,
+        text=prayer_name,
+        color=WHITE
+    )
+    prayer_label.x = (PRAYER_WIDTH - prayer_label.bounding_box[2]) // 2
+    result_group.append(prayer_label)
+
+    # Create the rectangle with a white stroke for the time label
+    time_rect = Rect(
+        x=0,
+        y=total_label_height,
+        width=PRAYER_WIDTH,
+        height=PRAYER_HEIGHT - total_label_height,
+        outline=WHITE
+    )
+    result_group.append(time_rect)
+
+    # Create the time label
+    time_label = Label(
+        y=total_label_height + LABEL_SPACING + LABEL_SPACING // 2,
+        font=font,
+        color=WHITE
+    )
+    result_group.append(time_label)
+
+    return result_group, time_label
+
+
 #######################################################################################################################
 
 gc.collect()
@@ -430,6 +396,7 @@ while True:
         logger.info(f"Playing adhan for {next_prayer} ... ")
         pyportal.play_file(ADHANS[next_prayer])
         logger.info(f"Adhan for {next_prayer} has finished. ")
+        next_adhan_time = None
 
     if (next_prayer_time is None) or (new_next_prayer_time != next_prayer_time):
         if next_prayer_time is not None:
@@ -437,12 +404,15 @@ while True:
 
         next_prayer = new_next_prayer
         next_prayer_time = new_next_prayer_time
-        next_adhan_time = adafruit_datetime.time(hour=next_prayer_time.hour,
-                                                 minute=next_prayer_time.minute - ADHAN_MINUTES_BEFORE_PRAYER)
 
         if next_prayer_time is not None:
+            next_adhan_time = adafruit_datetime.time(
+                hour=(next_prayer_time.hour if next_prayer_time.minute >= ADHAN_MINUTES_BEFORE_PRAYER
+                      else (next_prayer_time.hour - 1) % 24),
+                minute=(next_prayer_time.minute - ADHAN_MINUTES_BEFORE_PRAYER) % 60
+            )
             logger.info(f"RTC: {adafruit_datetime.datetime.now()} ")
-            logger.info(f"Next prayer is {next_prayer} at {next_prayer_time} ")
+            logger.info(f"Next prayer is {next_prayer} at time {next_prayer_time} and adhan {next_adhan_time} ")
         else:
             logger.info(f"RTC: {adafruit_datetime.datetime.now()} ")
             logger.info(f"All prayers for today {adafruit_datetime.datetime.now().date()} have passed. ")
@@ -472,8 +442,8 @@ while True:
             time_until_next_prayer = (next_prayer_time.hour * 60 + next_prayer_time.minute) * 60 - \
                                      (current_time.hour * 60 + current_time.minute) * 60 - current_time.second
 
-        time_until_next_adhan = time_until_next_prayer - (ADHAN_MINUTES_BEFORE_PRAYER * 60) # FIXME : can be negative
+        time_until_next_adhan = time_until_next_prayer - (ADHAN_MINUTES_BEFORE_PRAYER * 60)  # FIXME : can be negative
         logger.info(f"RTC: {adafruit_datetime.datetime.now()} ")
         logger.info(f"Time until next adhan: {time_until_next_adhan} seconds ")
         logger.info(f"Time until next prayer: {time_until_next_prayer} seconds ")
-        time.sleep(time_until_next_adhan if time_until_next_adhan > 0 else 0)
+        time.sleep(time_until_next_adhan if time_until_next_adhan > 0 else time_until_next_prayer)
