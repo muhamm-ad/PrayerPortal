@@ -15,6 +15,7 @@ the device's screen, and play the Adhan (Islamic call to prayer) at the appropri
 - [Adafruit PyPortal Titano](https://learn.adafruit.com/adafruit-pyportal-titano)
 - Micro USB cable
 - Wi-Fi connection
+- SD card (less than 32 GB)
 
 ## Software Required
 
@@ -46,8 +47,9 @@ the device's screen, and play the Adhan (Islamic call to prayer) at the appropri
    circup --path ./CIRCUITPY/ install --auto
    ```
 
-4. **Upload Code**: Upload the `content` of the [CIRCUITPY](CIRCUITPY) directory to the PyPortal Titano:
-   
+4. **Upload Code**: 
+- Copy the content of the sd directory into your SD card.
+- Upload the `content` of the [CIRCUITPY](CIRCUITPY) directory to the PyPortal Titano: 
     - By drag and drop.
     - Or using the sync scripts :
        - Run the script from your terminal on Linux/macOS with `./sync.sh push` to upload all the `content` of the [CIRCUITPY](CIRCUITPY) directory.

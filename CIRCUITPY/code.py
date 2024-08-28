@@ -20,8 +20,8 @@ from adafruit_pyportal import PyPortal
 from digitalio import DigitalInOut
 
 print()
-# supervisor.runtime.autoreload = False
-# print("supervisor.runtime.autoreload = False")
+supervisor.runtime.autoreload = False
+print("supervisor.runtime.autoreload = False")
 
 esp: adafruit_esp32spi.ESP_SPIcontrol = adafruit_esp32spi.ESP_SPIcontrol(
     board.SPI(),
