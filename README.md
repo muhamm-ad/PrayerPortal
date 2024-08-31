@@ -44,7 +44,8 @@ the device's screen, and play the Adhan (Islamic call to prayer) at the appropri
    Install the necessary CircuitPython libraries by running the following command in the [root of this project](./):
    
    ```cli
-   circup --path ./CIRCUITPY/ install --auto
+   circup --path ./CIRCUITPY/ install adafruit-circuitpython-sd
+   circup --path ./sd/ install -r requirements.txt
    ```
 
 4. **Upload Code**: 
