@@ -1,25 +1,22 @@
-import gc
-from gc import mem_free
-from gc import collect as clean_memory
+import time
+from gc import collect as clean_memory, mem_free
+from os import getenv
+
 import displayio
 import rtc
-import time
 import board
 from storage import remount
 from digitalio import DigitalInOut
-
-from os import getenv
 from adafruit_bitmap_font import bitmap_font
 from adafruit_display_shapes.rect import Rect
 from adafruit_display_text.label import Label
 from micropython import const
 from adafruit_pyportal.graphics import Graphics
+from adafruit_pyportal import Peripherals
 from adafruit_esp32spi.adafruit_esp32spi import ESP_SPIcontrol
 from adafruit_connection_manager import get_radio_socketpool, get_radio_ssl_context
-from adafruit_datetime import datetime as adafruit_datetime
-from adafruit_datetime import date as adafruit_date
-from adafruit_datetime import time as adafruit_time
-from adafruit_logging import getLogger, FileHandler, StreamHandler, INFO
+from adafruit_datetime import date as adafruit_date, datetime as adafruit_datetime, time as adafruit_time
+from adafruit_logging import FileHandler, INFO, StreamHandler, getLogger
 from adafruit_requests import Session
 # import adafruit_touchscreen
 
@@ -33,7 +30,7 @@ esp: ESP_SPIcontrol = ESP_SPIcontrol(
         DigitalInOut(board.ESP_RESET)
 )
 # Create a shared requests session
-requests = Session(get_radio_socketpool(esp),get_radio_ssl_context(esp))
+requests = Session(get_radio_socketpool(esp), get_radio_ssl_context(esp))
 
 graphics = Graphics(
         # default_bg="/sd/images/bgs/loading.bmp",
@@ -86,7 +83,6 @@ CT_HEIGHT = const((CENTER_HEIGHT // 3) * 2)
 CT_X = const(0)
 CT_Y = const(PRAYER_HEIGHT)
 
-
 # date group
 CD_WIDTH = const(SCREEN_WIDTH // 2)
 CD_HEIGHT = const(CENTER_HEIGHT // 3)
@@ -129,21 +125,6 @@ ADHANS = {
         "name": "Qari Abdul Kareem"
     }
 }
-
-# ---------- Set Fonts ------------- #
-DEFAULT_FONT_INTERLINE = const(4)
-DEFAULT_FONT_SIZE = const(16)
-DEFAULT_FONT = bitmap_font.load_font("/sd/fonts/Helvetica-Bold-16.bdf")
-DEFAULT_FONT.load_glyphs(b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 :")
-
-FONT_BOLD_24_ALPHA_NUM_INTERLINE = const(6)
-FONT_BOLD_24_ALPHA_NUM_SIZE = const(24)
-FONT_BOLD_24_ALPHA_NUM = bitmap_font.load_font("/sd/fonts/Helvetica-Bold-24-AlphaNum.bdf")
-FONT_BOLD_24_ALPHA_NUM.load_glyphs(b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 :")
-
-CT_FONT_SIZE = const(48)
-CT_FONT = bitmap_font.load_font("/sd/fonts/Helvetica-Bold-48-CurrentTime.bdf")
-CT_FONT.load_glyphs(b"0123456789:")
 
 # Touchscreen setup [ Rotate 0 ]
 display = board.DISPLAY
@@ -253,46 +234,63 @@ def fetch_and_set_rtc() :
                 time.sleep(RETRIES_DELAY)
 
 
-def fetch_prayer_times(date: adafruit_date = None):
-    global requests
-    if date is None:
-        date = adafruit_datetime.now().date()
-
+def construct_prayer_times_url(date):
     adhans_api_base_url = "https://api.aladhan.com/v1/"
     country = getenv("COUNTRY", "Canada")
     state = getenv("STATE", "")
     city = getenv("CITY", "Montreal")
     methode = getenv("CALCULATION_METHOD", 2)
 
+    url = f"{adhans_api_base_url}timingsByCity?date={date.day}-{date.month}-{date.year}&country={country}&city={city}&method={methode}"
+    if state:
+        url += f"&state={state}"
+
+    logger.info(
+            f"Fetching prayer times for {city},{(' ' + state + ',') if state else ''} {country} for {date} using method {methode} "
+    )
+    logger.info(f"URL: {url}")
+    clean_memory()
+    return url
+
+
+def try_fetch_prayer_times(url):
+    global requests
     retry_count = 0
+
     while retry_count < MAX_RETRIES:
         try:
-            url = f"{adhans_api_base_url}timingsByCity?date={date.day}-{date.month}-{date.year}&country={country}&city={city}&method={methode}"
-            if state:
-                url += f"&state={state}"
-            logger.info(
-                    f"Fetching prayer times for {city},{(' ' + state + ',') if state else ''} {country} for {date} using method {methode} "
-            )
-            logger.info(f"URL: {url} ")
-
+            logger.info(f"Attempting to fetch prayer times from {url}")
             clean_memory()
-            print(f"Free memory: {mem_free()} ")
+
             response = requests.get(url=url)
             response_json = response.json()
             response.close()
-            logger.info("Prayer times fetched successfully! ")
+
+            logger.info("Prayer times fetched successfully!")
             clean_memory()
             return response_json
         except Exception as e:
             retry_count += 1
             if retry_count == MAX_RETRIES:
-                logger.error(f"Failed to fetch prayer times: {e} ")
-                print(f"Free memory: {mem_free()} ")
+                logger.error(f"Failed to fetch prayer times: {e}")
+                clean_memory()
                 raise
             else:
-                logger.warning("Failed to fetch prayer times, retrying ... ")
+                logger.warning("Failed to fetch prayer times, retrying...")
                 clean_memory()
                 time.sleep(RETRIES_DELAY)
+
+
+def fetch_prayer_times(date: adafruit_date = None):
+    global requests
+
+    if date is None:
+        date = adafruit_datetime.now().date()
+
+    url = construct_prayer_times_url(date)
+    clean_memory()
+
+    return try_fetch_prayer_times(url)
 
 
 def get_day_timings(data, date):
@@ -308,7 +306,7 @@ def get_day_timings(data, date):
     return None
 
 
-def get_next_prayer(timings, current_t:adafruit_time = None):
+def get_next_prayer(timings, current_t: adafruit_time = None):
     if timings is not None:
         if current_t is None:
             current_t = adafruit_datetime.now().time()
@@ -380,20 +378,19 @@ def get_str_date(today_data):
 
 
 def create_prayer_group(x_position, y_position, prayer_name, width, height):
+    prayer_group_font = bitmap_font.load_font("/sd/fonts/Helvetica-Bold-16.bdf")
+    prayer_group_font.load_glyphs(b"FDAMIajrhursgib0123456789:")
+
     prayer_group = displayio.Group(scale=1, x=x_position, y=y_position)
 
     # Calculate dimensions
-    total_label_height = PRAYER_ICON_SIZE + DEFAULT_FONT_SIZE + DEFAULT_FONT_INTERLINE
+    total_label_height = PRAYER_ICON_SIZE + 16 + 4
 
     # Create the rectangle with a white stroke for the icon and label
-    prayer_rect = Rect(
-            x=0,
-            y=0,
-            width=width,
-            height=total_label_height,
-            outline=WHITE
-    )
+    clean_memory()
+    prayer_rect = Rect(x=0, y=0, width=width, height=total_label_height, outline=WHITE)
     prayer_group.append(prayer_rect)
+    clean_memory()
 
     # Add the icon image group
     icon_group = displayio.Group(scale=1, x=(width - PRAYER_ICON_SIZE) // 2, y=0)
@@ -403,7 +400,7 @@ def create_prayer_group(x_position, y_position, prayer_name, width, height):
     # Create the prayer label
     prayer_label = Label(
             y=PRAYER_ICON_SIZE + (total_label_height - PRAYER_ICON_SIZE) // 2,
-            font=DEFAULT_FONT,
+            font=prayer_group_font,
             text=prayer_name,
             color=WHITE
     )
@@ -411,19 +408,15 @@ def create_prayer_group(x_position, y_position, prayer_name, width, height):
     prayer_group.append(prayer_label)
 
     # Create the rectangle with a white stroke for the time label
-    time_rect = Rect(
-            x=0,
-            y=total_label_height,
-            width=width,
-            height=height - total_label_height,
-            outline=WHITE
-    )
+    clean_memory()
+    time_rect = Rect(x=0, y=total_label_height, width=width, height=height - total_label_height, outline=WHITE)
     prayer_group.append(time_rect)
+    clean_memory()
 
     # Create the time label
     time_label = Label(
             y=total_label_height + (height - total_label_height) // 2,
-            font=DEFAULT_FONT,
+            font=prayer_group_font,
             color=WHITE
     )
     prayer_group.append(time_label)
@@ -431,15 +424,19 @@ def create_prayer_group(x_position, y_position, prayer_name, width, height):
 
 
 def create_current_time_group(x_position, y_position, width, height, current_time):
+    ct_group_font = bitmap_font.load_font("/sd/fonts/Helvetica-Bold-48-CurrentTime.bdf")
+    ct_group_font.load_glyphs(b"0123456789:")
+
     ct_group = displayio.Group(scale=1, x=x_position, y=y_position)
 
+    # clean_memory()
     # ct_rect = Rect(x=0, y=0, width=width, height=height, outline=WHITE)
     # ct_group.append(ct_rect)
     # clean_memory()
 
     time_label = Label(
             y=height // 2,
-            font=CT_FONT,
+            font=ct_group_font,
             text=current_time,
             color=WHITE
     )
@@ -447,17 +444,22 @@ def create_current_time_group(x_position, y_position, width, height, current_tim
     ct_group.append(time_label)
     return ct_group, time_label
 
+
 def create_date_group(x_position, y_position, width, height, gregorian, hijri):
+    date_group_font = bitmap_font.load_font("/sd/fonts/Helvetica-Bold-16.bdf")
+    # date_group_font = bitmap_font.load_font("/sd/fonts/Helvetica-Bold-24-AlphaNum.bdf")
+    date_group_font.load_glyphs(b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 :")
+
     cd_group = displayio.Group(scale=1, x=x_position, y=y_position)
 
+    clean_memory()
     cd_rect = Rect(x=0, y=0, width=width, height=height, outline=WHITE)
     cd_group.append(cd_rect)
     clean_memory()
 
     gregorian_label = Label(
-            y=height // 2 - DEFAULT_FONT_SIZE,
-            # font=FONT_BOLD_24_ALPHA_NUM,
-            font=DEFAULT_FONT,
+            y=height // 2 - 16,
+            font=date_group_font,
             text=gregorian,
             color=WHITE
     )
@@ -465,9 +467,8 @@ def create_date_group(x_position, y_position, width, height, gregorian, hijri):
     cd_group.append(gregorian_label)
 
     hijri_label = Label(
-            y=height // 2 + DEFAULT_FONT_SIZE,
-            # font=FONT_BOLD_24_ALPHA_NUM,
-            font=DEFAULT_FONT,
+            y=height // 2 + 16,
+            font=date_group_font,
             text=hijri,
             color=WHITE
     )
@@ -478,15 +479,21 @@ def create_date_group(x_position, y_position, width, height, gregorian, hijri):
 
 
 def create_next_prayer_group(x_position, y_position, width, height, title):
+    np_group_title_font = bitmap_font.load_font("/sd/fonts/Helvetica-Bold-16.bdf")
+    np_group_title_font.load_glyphs(b"NextPrayerAdhancountdown ")
+    np_font = bitmap_font.load_font("/sd/fonts/Helvetica-Bold-24-AlphaNum.bdf")
+    np_font.load_glyphs(b"FDAMIajrhursgib0123456789:H")
+
     np_group = displayio.Group(scale=1, x=x_position, y=y_position)
 
+    clean_memory()
     np_rect = Rect(x=0, y=0, width=width, height=height, outline=WHITE)
     np_group.append(np_rect)
     clean_memory()
 
     title_label = Label(
-            y=height // 2 - DEFAULT_FONT_SIZE,
-            font=DEFAULT_FONT,
+            y=height // 2 - 16,
+            font=np_group_title_font,
             text=title,
             color=WHITE
     )
@@ -494,8 +501,8 @@ def create_next_prayer_group(x_position, y_position, width, height, title):
     np_group.append(title_label)
 
     text_label = Label(
-            y=height // 2 + DEFAULT_FONT_SIZE,
-            font=FONT_BOLD_24_ALPHA_NUM,
+            y=height // 2 + 16,
+            font=np_font,
             color=WHITE
     )
     np_group.append(text_label)
@@ -505,6 +512,7 @@ def create_next_prayer_group(x_position, y_position, width, height, title):
 def create_footer_group(x_position, y_position, width, height):
     footer_group = displayio.Group(scale=1, x=x_position, y=y_position)
 
+    # clean_memory()
     # footer_rect = Rect(x=0, y=0, width=width, height=height, outline=WHITE)
     # footer_group.append(footer_rect)
     # clean_memory()
@@ -513,104 +521,9 @@ def create_footer_group(x_position, y_position, width, height):
 
 
 #######################################################################################################################
+today_data = None
+
 def main():
-    clean_memory()
-    connect_to_wifi()
-    fetch_and_set_rtc()
-    prayers_date = today_date = adafruit_datetime.now().date()
-    # today_data = fetch_prayer_times(prayers_date) # FIXME
-    today_data = {
-        "code": 200,
-        "status": "OK",
-        "data": {
-            "timings": {
-                "Fajr": "05:59",
-                "Sunrise": "06:58",
-                "Dhuhr": "13:06",
-                "Asr": "16:25",
-                "Sunset": "19:13",
-                "Maghrib": "19:13",
-                "Isha": "20:12",
-                "Imsak": "05:49",
-                "Midnight": "01:06",
-                "Firstthird": "23:08",
-                "Lastthird": "03:03"
-            },
-            "date": {
-                "readable": "12 Sep 2024",
-                "timestamp": "1726124400",
-                "hijri": {
-                    "date": "08-03-1446",
-                    "format": "DD-MM-YYYY",
-                    "day": "08",
-                    "weekday": {
-                        "en": "Al Khamees",
-                        "ar": "الخميس"
-                    },
-                    "month": {
-                        "number": 3,
-                        "en": "Rabīʿ al-awwal",
-                        "ar": "رَبيع الأوّل"
-                    },
-                    "year": "1446",
-                    "designation": {
-                        "abbreviated": "AH",
-                        "expanded": "Anno Hegirae"
-                    },
-                    "holidays": []
-                },
-                "gregorian": {
-                    "date": "12-09-2024",
-                    "format": "DD-MM-YYYY",
-                    "day": "12",
-                    "weekday": {
-                        "en": "Thursday"
-                    },
-                    "month": {
-                        "number": 9,
-                        "en": "September"
-                    },
-                    "year": "2024",
-                    "designation": {
-                        "abbreviated": "AD",
-                        "expanded": "Anno Domini"
-                    }
-                }
-            },
-            "meta": {
-                "latitude": 1.234567,
-                "longitude": 2.34567,
-                "timezone": "Africa/Dakar",
-                "method": {
-                    "id": 2,
-                    "name": "Islamic Society of North America (ISNA)",
-                    "params": {
-                        "Fajr": 15,
-                        "Isha": 15
-                    },
-                    "location": {
-                        "latitude": 39.7042123,
-                        "longitude": -86.3994387
-                    }
-                },
-                "latitudeAdjustmentMethod": "ANGLE_BASED",
-                "midnightMode": "STANDARD",
-                "school": "STANDARD",
-                "offset": {
-                    "Imsak": 0,
-                    "Fajr": 0,
-                    "Sunrise": 0,
-                    "Dhuhr": 0,
-                    "Asr": 0,
-                    "Maghrib": 0,
-                    "Sunset": 0,
-                    "Isha": 0,
-                    "Midnight": 0
-                }
-            }
-        }
-    }
-    disconnect_from_wifi()
 
     splash = displayio.Group(scale=1, x=0, y=0)
     clean_memory()
@@ -626,7 +539,8 @@ def main():
     for i, prayer in enumerate(["Fajr", "Dhuhr", "Asr", "Maghrib", "Isha"]):
         group, time_label = create_prayer_group(x_position=(i * PRAYER_WIDTH), y_position=PRAYER_GROUP_Y,
                                                 width=PRAYER_WIDTH, height=PRAYER_HEIGHT,
-                                                prayer_name=prayer)
+                                                prayer_name=prayer
+                                                )
         splash.append(group)
         time_labels[prayer] = time_label  # Store the time label for later updates
     clean_memory()
@@ -634,7 +548,8 @@ def main():
     # Add current time at the center
     ct_group, ct_label = create_current_time_group(x_position=CT_X, y_position=CT_Y,
                                                    width=CT_WIDTH, height=CT_HEIGHT,
-                                                   current_time=get_str_time(adafruit_datetime.now().time()))
+                                                   current_time=get_str_time(adafruit_datetime.now().time())
+                                                   )
     splash.append(ct_group)
     clean_memory()
 
@@ -642,19 +557,20 @@ def main():
     today_gregorian, today_hijiri = get_str_date(today_data)
     cd_group, gregorian_label, hijri_label = create_date_group(x_position=CD_X, y_position=CD_Y,
                                                                width=CD_WIDTH + 1, height=CD_HEIGHT,
-                                                               gregorian=today_gregorian, hijri=today_hijiri)
+                                                               gregorian=today_gregorian, hijri=today_hijiri
+                                                               )
     splash.append(cd_group)
     clean_memory()
 
     # Add next prayer at the top right
     SINGLE_NP_HEIGHT = NP_HEIGHT // 3
-    np_name_group, np_name_label = create_next_prayer_group(x_position=NP_X, y_position=NP_Y-1,
-                                                            width=NP_WIDTH, height=SINGLE_NP_HEIGHT+1,
+    np_name_group, np_name_label = create_next_prayer_group(x_position=NP_X, y_position=NP_Y - 1,
+                                                            width=NP_WIDTH, height=SINGLE_NP_HEIGHT + 1,
                                                             title="Next Prayer"
                                                             )
     clean_memory()
-    np_adhan_group, np_adhan_label = create_next_prayer_group(x_position=NP_X, y_position=NP_Y+SINGLE_NP_HEIGHT-1,
-                                                              width=NP_WIDTH, height=SINGLE_NP_HEIGHT+2,
+    np_adhan_group, np_adhan_label = create_next_prayer_group(x_position=NP_X, y_position=NP_Y + SINGLE_NP_HEIGHT - 1,
+                                                              width=NP_WIDTH, height=SINGLE_NP_HEIGHT + 2,
                                                               title="Next Adhan"
                                                               )
     clean_memory()
@@ -687,13 +603,9 @@ def main():
 
     while True:
         # only query the online time once per hour (and on first run)
-        # if (time.monotonic() - localtile_refresh) > 3600:
-        #     try:
-        #         fetch_and_set_rtc()
-        #         localtile_refresh = time.monotonic()
-        #     except RuntimeError as e:
-        #         logger.info("Some error occured, retrying! -", e)
-        #         continue
+        if (time.monotonic() - localtile_refresh) > 3600:
+            fetch_and_set_rtc()
+            localtile_refresh = time.monotonic()
 
         # update time label
         ct_label.text = get_str_time(adafruit_datetime.now().time())
@@ -733,7 +645,7 @@ def main():
 
         if (next_adhan_time is not None) and (ct >= next_adhan_time):
             logger.info(f"Playing adhan {ADHANS[next_prayer]['name']} for {next_prayer} ... ")
-            # adafruit_pyportal.play_file(ADHANS[next_prayer]['file']) # FIXME
+            Peripherals.play_file(ADHANS[next_prayer]['file']) # FIXME
             logger.info(f"Adhan for {next_prayer} has finished. ")
             next_adhan_time = None
 
@@ -798,13 +710,24 @@ def main():
             # time.sleep(time_until_next_adhan if time_until_next_adhan > 0 else time_until_next_prayer)
 
             # update next prayer countdown label
-            np_countdown_label.text = str(time_until_next_prayer)
+            hours = time_until_next_prayer // 3600
+            minutes = (time_until_next_prayer % 3600) // 60
+            np_countdown_label.text = f"{hours:02d} h {minutes:02d} m"
             np_countdown_label.x = (NP_WIDTH - np_countdown_label.bounding_box[2]) // 2
 
+def init_fetchs():
+    global today_data
+    clean_memory()
+    connect_to_wifi()
+    fetch_and_set_rtc()
+    prayers_date = adafruit_datetime.now().date()
+    today_data = fetch_prayer_times(prayers_date)  # FIXME
+    disconnect_from_wifi()
 
-import supervisor
-supervisor.runtime.autoreload = False
+from supervisor import runtime
+runtime.autoreload = False
 print("supervisor.runtime.autoreload = False")
+init_fetchs()
 main()
 # retry_count = 0
 # while retry_count < MAX_RETRIES:
