@@ -3,6 +3,10 @@
 **PrayerPortal** uses the Adafruit PyPortal Titano to automatically fetch Muslim prayer times via Wi-Fi, display them on
 the device's screen, and play the Adhan (Islamic call to prayer) at the appropriate times.
 
+<p align="center">
+  <img src="PrayerPortal.png" title="" alt="exemple" width="65%">
+</p>
+
 ## Features
 
 - **Automatic Prayer Times Fetching**: Connects to the internet to retrieve accurate prayer times for your location.
@@ -15,11 +19,10 @@ the device's screen, and play the Adhan (Islamic call to prayer) at the appropri
 - [Adafruit PyPortal Titano](https://learn.adafruit.com/adafruit-pyportal-titano)
 - Micro USB cable
 - Wi-Fi connection
-- SD card (less than 32 GB)
+- SD card ( < 32GB & > 1GB )
 
 ## Software Required
 
-- Python 3.x
 - [Circup](https://learn.adafruit.com/keep-your-circuitpython-libraries-on-devices-up-to-date-with-circup/overview)
 
 [//]: # (## Required Libraries)
@@ -71,7 +74,6 @@ the device's screen, and play the Adhan (Islamic call to prayer) at the appropri
 
 - **Custom Adhan Audio**: Allow users to choose different Adhan recordings from the SD card.
 - **Multiple Locations**: Add support for selecting different locations directly on the device.
-- **UI Improvements**: Enhance the graphical display with additional features like a countdown to the next prayer.
 - **On-Device Wi-Fi Configuration**: Enable users to set up Wi-Fi credentials directly on the device without needing to
   modify the `settings.toml` file.
 
