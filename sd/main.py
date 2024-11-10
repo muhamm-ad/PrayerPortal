@@ -16,7 +16,7 @@ from adafruit_esp32spi.adafruit_esp32spi import ESP_SPIcontrol
 from adafruit_connection_manager import get_radio_socketpool, get_radio_ssl_context
 from adafruit_datetime import date as adafruit_date, datetime as adafruit_datetime, time as adafruit_time
 from adafruit_logging import FileHandler, INFO, StreamHandler, getLogger
-from adafruit_requests import Session, Response
+from adafruit_requests import Session
 # import adafruit_touchscreen
 
 clean_memory()
@@ -66,10 +66,8 @@ if SECRETS["ssid"] is None or SECRETS["password"] is None:
     # TODO Show error on screen
     raise ValueError("Wi-Fi secrets are missing. Please add them in settings.py!")
 
-RETRIES_DELAY = const(5)
+RETRIES_DELAY = const(10)
 MAX_RETRIES = const(2)
-
-requests = Session(socket_pool=get_radio_socketpool(esp), ssl_context=get_radio_ssl_context(esp))
 
 def connect_to_wifi():
     global esp
@@ -88,7 +86,6 @@ def connect_to_wifi():
         clean_memory()
         # logger.info(f"My IP address is {esp.ipv4_address} ")
 
-
 def disconnect_from_wifi():
     global esp
     if esp.connected:
@@ -101,10 +98,8 @@ def disconnect_from_wifi():
             logger.error(f"Failed to disconnect from Wi-Fi: {e} ")
             raise
 
-
 def fetch_and_set_rtc():
-    global requests
-
+    requests = Session(socket_pool=get_radio_socketpool(esp), ssl_context=get_radio_ssl_context(esp))
     word_time_api_url = "http://worldtimeapi.org/api/ip"
     logger.info(f"Fetching time from {word_time_api_url} ")
     response = None
@@ -134,12 +129,13 @@ def fetch_and_set_rtc():
                 raise
             else:
                 logger.warning("Failed to fetch and set RTC, retrying ... ")
-                clean_memory()
+                time.sleep(RETRIES_DELAY)
                 if response:
                     response.close()
                     del response
-                time.sleep(RETRIES_DELAY)
-
+                del requests
+                requests = Session(socket_pool=get_radio_socketpool(esp), ssl_context=get_radio_ssl_context(esp))
+                clean_memory()
 
 def construct_prayer_times_url(date):
     adhans_api_base_url = "https://api.aladhan.com/v1/"
@@ -159,37 +155,36 @@ def construct_prayer_times_url(date):
     clean_memory()
     return url
 
-
 def try_fetch_prayer_times(url):
-    global requests
+    requests = Session(socket_pool=get_radio_socketpool(esp), ssl_context=get_radio_ssl_context(esp))
     retry_count = 0
     response = None
     while retry_count < MAX_RETRIES:
         try:
-            logger.info(f"Attempting to fetch prayer times from {url}")
+            logger.info(f"Attempting to fetch prayer times ...")
             clean_memory()
             response = requests.get(url=url, stream=True)
             response_json = response.json()
             response.close()
             del response
-
             logger.info("Prayer times fetched successfully!")
             clean_memory()
             return response_json
         except Exception as e:
             retry_count += 1
+
             if retry_count == MAX_RETRIES:
                 logger.error(f"Failed to fetch prayer times: {e}")
-                clean_memory()
                 raise
             else:
                 logger.warning("Failed to fetch prayer times, retrying...")
-                clean_memory()
+                time.sleep(RETRIES_DELAY)
                 if response:
                     response.close()
                     del response
-                time.sleep(RETRIES_DELAY)
-
+                del requests
+                requests = Session(socket_pool=get_radio_socketpool(esp), ssl_context=get_radio_ssl_context(esp))
+                clean_memory()
 
 def fetch_prayer_times(date: adafruit_date = None):
     if date is None:
@@ -199,7 +194,6 @@ def fetch_prayer_times(date: adafruit_date = None):
     clean_memory()
 
     return try_fetch_prayer_times(url)
-
 
 clean_memory()
 
@@ -254,7 +248,6 @@ ADHANS = {
     }
 }
 
-
 # ------------- Functions ------------- #
 
 def set_image(group, filename):
@@ -263,7 +256,7 @@ def set_image(group, filename):
         :param group: The chosen group
         :param filename: The filename of the chosen image
     """
-    print("Set image to ", filename)
+    print("Set image ", filename)
     if group:
         group.pop()
 
@@ -277,9 +270,8 @@ def set_image(group, filename):
 
     group.append(image_sprite)
 
-
 def get_str_time(the_time):
-    return f"{the_time.__str__()}"
+    return f"{the_time.hour:02}:{the_time.minute:02}"
 
 
 def get_hijri_str_month(month_number):
@@ -299,7 +291,6 @@ def get_hijri_str_month(month_number):
     }
     return months[month_number]
 
-
 def get_str_date(data):
     today_gregorian_dict = data['data']['date']['gregorian']
     today_gregorian = today_gregorian_dict['day'] + ' ' + today_gregorian_dict['month']['en'] + ' ' + \
@@ -308,7 +299,6 @@ def get_str_date(data):
     today_hijiri = today_hijiri_dict['day'] + ' ' + get_hijri_str_month(today_hijiri_dict['month']['number']) + ' ' + \
                    today_hijiri_dict['year']
     return today_gregorian, today_hijiri
-
 
 def get_day_timings(data, date):
     if data is not None:
@@ -321,7 +311,6 @@ def get_day_timings(data, date):
         if api_date == date:
             return data['timings']
     return None
-
 
 def get_next_prayer(timings, current_t: adafruit_time = None):
     if timings is not None:
@@ -336,7 +325,6 @@ def get_next_prayer(timings, current_t: adafruit_time = None):
                 return next_p, next_p_time
 
     return None, None
-
 
 def get_next_day(date_obj: adafruit_date):
     """
@@ -361,12 +349,16 @@ def get_next_day(date_obj: adafruit_date):
         else:
             return adafruit_date(year=date_obj.year, month=date_obj.month + 1, day=1)
 
-
 # ------------- Inits ------------- #
 
-# Touchscreen setup [ Rotate 0 ]
+clean_memory()
+print("\n************************")
+print(f"** Free memory: {mem_free()} **")
+print("************************\n")
+
 display = board.DISPLAY
 display.rotation = 0
+
 # Initializes the display touch screen area
 # ts = adafruit_touchscreen.Touchscreen(board.TOUCH_XL, board.TOUCH_XR,
 #                                       board.TOUCH_YD, board.TOUCH_YU,
@@ -433,6 +425,10 @@ splash.append(footer_adhan_label)
 
 clean_memory()
 
+print("\n************************")
+print(f"** Free memory: {mem_free()} **")
+print("************************\n")
+
 # ------------- Run ------------- #
 
 today_timings = None
@@ -479,7 +475,8 @@ while True:
             for i, prayer in enumerate(["Fajr", "Dhuhr", "Asr", "Maghrib", "Isha"]):
                 logger.info(f"{prayer}: {today_timings[prayer]}{', ' if prayer != 'Isha' else ''} ")
                 prayer_time_labels[prayer].text = today_timings[prayer]  # Update the time label text
-                prayer_time_labels[prayer].x = (i*96) + (96 - prayer_time_labels[prayer].bounding_box[2]) // 2  # Recenter the text
+                prayer_time_labels[prayer].x = (i * 96) + (
+                        96 - prayer_time_labels[prayer].bounding_box[2]) // 2  # Recenter the text
 
     if all_prayers_passed:
         all_prayers_passed = False
@@ -571,4 +568,3 @@ while True:
         minutes = (time_until_next_prayer % 3600) // 60
         np_countdown_label.text = f"{hours:02d} h {minutes:02d} m"
         np_countdown_label.x = 240 + (240 - np_countdown_label.bounding_box[2]) // 2
-
