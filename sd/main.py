@@ -16,8 +16,7 @@ from adafruit_esp32spi.adafruit_esp32spi import ESP_SPIcontrol
 from adafruit_connection_manager import get_radio_socketpool, get_radio_ssl_context
 from adafruit_datetime import date as adafruit_date, datetime as adafruit_datetime, time as adafruit_time
 from adafruit_logging import FileHandler, INFO, StreamHandler, getLogger
-from adafruit_requests import Session
-from supervisor import reload as reload_supervisor, runtime
+from adafruit_requests import Session, Response
 # import adafruit_touchscreen
 
 clean_memory()
@@ -108,7 +107,7 @@ def fetch_and_set_rtc():
 
     word_time_api_url = "http://worldtimeapi.org/api/ip"
     logger.info(f"Fetching time from {word_time_api_url} ")
-
+    response = None
     retry_count = 0
     while retry_count < MAX_RETRIES:
         try:
@@ -136,6 +135,9 @@ def fetch_and_set_rtc():
             else:
                 logger.warning("Failed to fetch and set RTC, retrying ... ")
                 clean_memory()
+                if response:
+                    response.close()
+                    del response
                 time.sleep(RETRIES_DELAY)
 
 
@@ -161,7 +163,7 @@ def construct_prayer_times_url(date):
 def try_fetch_prayer_times(url):
     global requests
     retry_count = 0
-
+    response = None
     while retry_count < MAX_RETRIES:
         try:
             logger.info(f"Attempting to fetch prayer times from {url}")
@@ -183,6 +185,9 @@ def try_fetch_prayer_times(url):
             else:
                 logger.warning("Failed to fetch prayer times, retrying...")
                 clean_memory()
+                if response:
+                    response.close()
+                    del response
                 time.sleep(RETRIES_DELAY)
 
 
@@ -441,147 +446,129 @@ localtile_refresh = time.monotonic()
 # Set the splash screen as the root group for display
 board.DISPLAY.root_group = splash
 
-runtime.autoreload = False
-print("supervisor.runtime.autoreload = False")
-retry_number = 2
-while retry_number > 0:
-    try:
-        clean_memory()
-        while True:
-            # only query the online time once per hour (and on first run)
-            if (time.monotonic() - localtile_refresh) > 3600:
-                fetch_and_set_rtc()
-                localtile_refresh = time.monotonic()
+clean_memory()
+while True:
+    # only query the online time once per hour (and on first run)
+    if (time.monotonic() - localtile_refresh) > 3600:
+        fetch_and_set_rtc()
+        localtile_refresh = time.monotonic()
 
-            # update time label
-            ct_label.text = get_str_time(adafruit_datetime.now().time())
-            ct_label.x = (240 - ct_label.bounding_box[2]) // 2
+    # update time label
+    ct_label.text = get_str_time(adafruit_datetime.now().time())
+    ct_label.x = (240 - ct_label.bounding_box[2]) // 2
 
-            # update date label
-            if today_date != adafruit_datetime.now().date():
-                today_date = adafruit_datetime.now().date()
-                today_gregorian, today_hijiri = get_str_date(today_data)
-                cd_gregorian_label.text = today_gregorian
-                cd_gregorian_label.x = (240 - cd_gregorian_label.bounding_box[2]) // 2
-                cd_hijri_label.text = today_hijiri
-                cd_hijri_label.x = (240 - cd_hijri_label.bounding_box[2]) // 2
+    # update date label
+    if today_date != adafruit_datetime.now().date():
+        today_date = adafruit_datetime.now().date()
+        today_gregorian, today_hijiri = get_str_date(today_data)
+        cd_gregorian_label.text = today_gregorian
+        cd_gregorian_label.x = (240 - cd_gregorian_label.bounding_box[2]) // 2
+        cd_hijri_label.text = today_hijiri
+        cd_hijri_label.x = (240 - cd_hijri_label.bounding_box[2]) // 2
 
-            clean_memory()
-            if today_timings is None:
-                today_timings = get_day_timings(today_data['data'], prayers_date)
-                if today_timings is not None:
-                    if start:
-                        start = False
-                        logger.info("Today's Prayer Times: ")
-                    else:
-                        logger.info("Tomorrow's Prayer Times: ")
-
-                    for i, prayer in enumerate(["Fajr", "Dhuhr", "Asr", "Maghrib", "Isha"]):
-                        logger.info(f"{prayer}: {today_timings[prayer]}{', ' if prayer != 'Isha' else ''} ")
-                        prayer_time_labels[prayer].text = today_timings[prayer]  # Update the time label text
-                        prayer_time_labels[prayer].x = (i*96) + (96 - prayer_time_labels[prayer].bounding_box[2]) // 2  # Recenter the text
-
-            if all_prayers_passed:
-                all_prayers_passed = False
-                ct = adafruit_time(hour=00, minute=00, second=00)
+    clean_memory()
+    if today_timings is None:
+        today_timings = get_day_timings(today_data['data'], prayers_date)
+        if today_timings is not None:
+            if start:
+                start = False
+                logger.info("Today's Prayer Times: ")
             else:
-                ct = adafruit_datetime.now().time()
+                logger.info("Tomorrow's Prayer Times: ")
 
-            new_next_prayer, new_next_prayer_time = get_next_prayer(timings=today_timings, current_t=ct)
+            for i, prayer in enumerate(["Fajr", "Dhuhr", "Asr", "Maghrib", "Isha"]):
+                logger.info(f"{prayer}: {today_timings[prayer]}{', ' if prayer != 'Isha' else ''} ")
+                prayer_time_labels[prayer].text = today_timings[prayer]  # Update the time label text
+                prayer_time_labels[prayer].x = (i*96) + (96 - prayer_time_labels[prayer].bounding_box[2]) // 2  # Recenter the text
 
-            if (next_adhan_time is not None) and (ct >= next_adhan_time):
-                logger.info(f"Playing adhan {ADHANS[next_prayer]['name']} for {next_prayer} ... ")
-                Peripherals.play_file(file_name=ADHANS[next_prayer]['file'], wait_to_finish=True)
-                logger.info(f"Adhan for {next_prayer} has finished. ")
-                next_adhan_time = None
+    if all_prayers_passed:
+        all_prayers_passed = False
+        ct = adafruit_time(hour=00, minute=00, second=00)
+    else:
+        ct = adafruit_datetime.now().time()
 
-            if (next_prayer_time is None) or (new_next_prayer_time != next_prayer_time):
-                if next_prayer_time is not None:
-                    logger.info(f"{next_prayer} ({next_prayer_time}) has passed. Updating the next prayer time ... ")
+    new_next_prayer, new_next_prayer_time = get_next_prayer(timings=today_timings, current_t=ct)
 
-                next_prayer = new_next_prayer
-                next_prayer_time = new_next_prayer_time
+    if (next_adhan_time is not None) and (ct >= next_adhan_time):
+        logger.info(f"Playing adhan {ADHANS[next_prayer]['name']} for {next_prayer} ... ")
+        Peripherals.play_file(file_name=ADHANS[next_prayer]['file'], wait_to_finish=True)
+        logger.info(f"Adhan for {next_prayer} has finished. ")
+        next_adhan_time = None
 
-                if next_prayer_time is not None:
-                    next_adhan_time = adafruit_time(
-                            hour=(next_prayer_time.hour if next_prayer_time.minute >= ADHAN_MINUTES_BEFORE_PRAYER
-                                  else (next_prayer_time.hour - 1) % 24),
-                            minute=(next_prayer_time.minute - ADHAN_MINUTES_BEFORE_PRAYER) % 60
-                    )
-                    logger.info(f"RTC: {adafruit_datetime.now()} ")
-                    logger.info(f"Next prayer is {next_prayer} at time {next_prayer_time} and adhan {next_adhan_time} ")
+    if (next_prayer_time is None) or (new_next_prayer_time != next_prayer_time):
+        if next_prayer_time is not None:
+            logger.info(f"{next_prayer} ({next_prayer_time}) has passed. Updating the next prayer time ... ")
 
-                    # update next prayer label
-                    np_name_label.text = next_prayer
-                    np_name_label.x = 240 + (240 - np_name_label.bounding_box[2]) // 2
+        next_prayer = new_next_prayer
+        next_prayer_time = new_next_prayer_time
 
-                    # update next adhan label
-                    np_adhan_label.text = get_str_time(next_adhan_time)
-                    np_adhan_label.x = 240 + (240 - np_adhan_label.bounding_box[2]) // 2
+        if next_prayer_time is not None:
+            next_adhan_time = adafruit_time(
+                    hour=(next_prayer_time.hour if next_prayer_time.minute >= ADHAN_MINUTES_BEFORE_PRAYER
+                          else (next_prayer_time.hour - 1) % 24),
+                    minute=(next_prayer_time.minute - ADHAN_MINUTES_BEFORE_PRAYER) % 60
+            )
+            logger.info(f"RTC: {adafruit_datetime.now()} ")
+            logger.info(f"Next prayer is {next_prayer} at time {next_prayer_time} and adhan {next_adhan_time} ")
 
-                    footer_adhan_label.text = f"{ADHANS[next_prayer]['name']}"
-                    footer_adhan_label.x = 28
+            # update next prayer label
+            np_name_label.text = next_prayer
+            np_name_label.x = 240 + (240 - np_name_label.bounding_box[2]) // 2
 
-                else:
-                    if not all_prayers_passed:
-                        logger.info(f"RTC: {adafruit_datetime.now()} ")
-                        logger.info(f"All prayers for today {adafruit_datetime.now().date()} have passed. ")
-                        all_prayers_passed = True
+            # update next adhan label
+            np_adhan_label.text = get_str_time(next_adhan_time)
+            np_adhan_label.x = 240 + (240 - np_adhan_label.bounding_box[2]) // 2
 
-                        prayers_date = get_next_day(prayers_date)
-                        logger.info(f"Tomorrow is {prayers_date}. ")
+            footer_adhan_label.text = f"{ADHANS[next_prayer]['name']}"
+            footer_adhan_label.x = 28
 
-                        clean_memory()
-                        print("\n*******************************")
-                        print(f"** Free memory: {mem_free()} **")
-                        print("*******************************\n")
-                        del today_data
-                        today_data = fetch_prayer_times(prayers_date)
-                        clean_memory()
-                        print("\n*******************************")
-                        print(f"** Free memory: {mem_free()} **")
-                        print("*******************************\n")
-
-                        today_timings = None
-
-            if next_prayer_time is not None:
-                current_time = adafruit_datetime.now().time()
-                one_day_in_seconds = 60 * 60 * 24
-
-                if (next_prayer == 'Fajr') and (current_time > next_prayer_time):
-                    # Calculate the time until Fajr, considering it's the next day
-                    section1 = one_day_in_seconds - (
-                            current_time.hour * 60 + current_time.minute) * 60 - current_time.second
-                    section2 = (next_prayer_time.hour * 60 + next_prayer_time.minute) * 60
-                    time_until_next_prayer = section1 + section2
-                else:
-                    # Calculate time until the next prayer within the same day
-                    time_until_next_prayer = (next_prayer_time.hour * 60 + next_prayer_time.minute) * 60 - \
-                                             (current_time.hour * 60 + current_time.minute) * 60 - current_time.second
-
-                time_until_next_adhan = time_until_next_prayer - (
-                        ADHAN_MINUTES_BEFORE_PRAYER * 60)  # FIXME : can be negative
-                logger.info(f"RTC: {adafruit_datetime.now()} ")
-                logger.info(f"Time until next adhan: {time_until_next_adhan} seconds ")
-                logger.info(f"Time until next prayer: {time_until_next_prayer} seconds ")
-                # time.sleep(time_until_next_adhan if time_until_next_adhan > 0 else time_until_next_prayer)
-
-                # update next prayer countdown label
-                hours = time_until_next_prayer // 3600
-                minutes = (time_until_next_prayer % 3600) // 60
-                np_countdown_label.text = f"{hours:02d} h {minutes:02d} m"
-                np_countdown_label.x = 240 + (240 - np_countdown_label.bounding_box[2]) // 2
-
-    except Exception as e:
-        retry_number -= 1
-        logger.error(f"Exception caught: {e}. Attempt {retry_number}")
-        # time.sleep(5)
-        if retry_number == 0:
-            logger.error("Max retries reached. Raising exception. ")
-            raise e
         else:
-            logger.info("Reloading program... ")
-            reload_supervisor()
+            if not all_prayers_passed:
+                logger.info(f"RTC: {adafruit_datetime.now()} ")
+                logger.info(f"All prayers for today {adafruit_datetime.now().date()} have passed. ")
+                all_prayers_passed = True
 
+                prayers_date = get_next_day(prayers_date)
+                logger.info(f"Tomorrow is {prayers_date}. ")
 
+                clean_memory()
+                print("\n*******************************")
+                print(f"** Free memory: {mem_free()} **")
+                print("*******************************\n")
+                del today_data
+                today_data = fetch_prayer_times(prayers_date)
+                clean_memory()
+                print("\n*******************************")
+                print(f"** Free memory: {mem_free()} **")
+                print("*******************************\n")
+
+                today_timings = None
+
+    if next_prayer_time is not None:
+        current_time = adafruit_datetime.now().time()
+        one_day_in_seconds = 60 * 60 * 24
+
+        if (next_prayer == 'Fajr') and (current_time > next_prayer_time):
+            # Calculate the time until Fajr, considering it's the next day
+            section1 = one_day_in_seconds - (
+                    current_time.hour * 60 + current_time.minute) * 60 - current_time.second
+            section2 = (next_prayer_time.hour * 60 + next_prayer_time.minute) * 60
+            time_until_next_prayer = section1 + section2
+        else:
+            # Calculate time until the next prayer within the same day
+            time_until_next_prayer = (next_prayer_time.hour * 60 + next_prayer_time.minute) * 60 - \
+                                     (current_time.hour * 60 + current_time.minute) * 60 - current_time.second
+
+        time_until_next_adhan = time_until_next_prayer - (
+                ADHAN_MINUTES_BEFORE_PRAYER * 60)  # FIXME : can be negative
+        logger.info(f"RTC: {adafruit_datetime.now()} ")
+        logger.info(f"Time until next adhan: {time_until_next_adhan} seconds ")
+        logger.info(f"Time until next prayer: {time_until_next_prayer} seconds ")
+        # time.sleep(time_until_next_adhan if time_until_next_adhan > 0 else time_until_next_prayer)
+
+        # update next prayer countdown label
+        hours = time_until_next_prayer // 3600
+        minutes = (time_until_next_prayer % 3600) // 60
+        np_countdown_label.text = f"{hours:02d} h {minutes:02d} m"
+        np_countdown_label.x = 240 + (240 - np_countdown_label.bounding_box[2]) // 2
 
