@@ -2,8 +2,3 @@
 # Wi-Fi Configuration
 CIRCUITPY_WIFI_SSID = "your_wifi_ssid"
 CIRCUITPY_WIFI_PASSWORD = "your_wifi_password"
-
-# Location Configuration
-#COUNTRY = "your_county"
-#STATE = "your_state"
-#CITY = "your_city"

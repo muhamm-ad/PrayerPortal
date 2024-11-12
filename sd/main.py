@@ -67,7 +67,7 @@ if SECRETS["ssid"] is None or SECRETS["password"] is None:
     raise ValueError("Wi-Fi secrets are missing. Please add them in settings.py!")
 
 RETRIES_DELAY = const(10)
-MAX_RETRIES = const(2)
+MAX_RETRIES = const(3)
 
 def connect_to_wifi():
     global esp
@@ -100,26 +100,25 @@ def disconnect_from_wifi():
 
 def fetch_and_set_rtc():
     requests = Session(socket_pool=get_radio_socketpool(esp), ssl_context=get_radio_ssl_context(esp))
-    word_time_api_url = "http://worldtimeapi.org/api/ip"
-    logger.info(f"Fetching time from {word_time_api_url} ")
+    api_url = "https://api.coindesk.com/v1/bpi/currentprice/USD.json"
+    logger.info(f"Fetching time from {api_url} ...")
     response = None
     retry_count = 0
     while retry_count < MAX_RETRIES:
         try:
-            response = requests.get(url=word_time_api_url, stream=True)
+            response = requests.get(url=api_url, stream=True)
             respond_json = response.json()
             response.close()
             del response
-
-            # Parse the ISO time string
-            iso_time_str = respond_json["datetime"][:-6]  # Remove timezone part
-
-            # iso_time_str = "2024-10-07T22:30:25.837247"
+            del requests
+            # Parse the ISO time string from the CoinDesk API
+            iso_time_str = respond_json["time"]["updatedISO"]
+            # Parse the datetime
             parsed_time = adafruit_datetime.fromisoformat(iso_time_str)
-
             # Set the RTC
             rtc.RTC().datetime = parsed_time.timetuple()
             logger.info(f"RTC has been set to {parsed_time} ")
+
             clean_memory()
             return parsed_time
         except Exception as e:
@@ -129,19 +128,49 @@ def fetch_and_set_rtc():
                 raise
             else:
                 logger.warning("Failed to fetch and set RTC, retrying ... ")
-                time.sleep(RETRIES_DELAY)
                 if response:
                     response.close()
                     del response
                 del requests
+                time.sleep(RETRIES_DELAY * retry_count)
                 requests = Session(socket_pool=get_radio_socketpool(esp), ssl_context=get_radio_ssl_context(esp))
                 clean_memory()
 
-def construct_prayer_times_url(date):
+def fetch_location():
+    requests = Session(socket_pool=get_radio_socketpool(esp), ssl_context=get_radio_ssl_context(esp))
+    api_url = "http://ip-api.com/json/"
+    logger.info(f"Fetching location from {api_url} ...")
+    response = None
+    retry_count = 0
+    while retry_count < MAX_RETRIES:
+        try:
+            response = requests.get(url=api_url, stream=True)
+            respond_json = response.json()
+            response.close()
+            del response
+            del requests
+            logger.info(f"Location is fetched successfully")
+
+            clean_memory()
+            return respond_json["country"], respond_json["city"]
+        except Exception as e:
+            retry_count += 1
+            if retry_count == MAX_RETRIES:
+                logger.error(f"Failed to fetch location: {e} ")
+                raise
+            else:
+                logger.warning("Failed to fetch location, retrying ... ")
+                if response:
+                    response.close()
+                    del response
+                del requests
+                time.sleep(RETRIES_DELAY * retry_count)
+                requests = Session(socket_pool=get_radio_socketpool(esp), ssl_context=get_radio_ssl_context(esp))
+                clean_memory()
+
+
+def construct_prayer_times_url(date, city, country, state):
     adhans_api_base_url = "https://api.aladhan.com/v1/"
-    country = getenv("COUNTRY", "Canada")
-    state = getenv("STATE", "")
-    city = getenv("CITY", "Montreal")
     methode = getenv("CALCULATION_METHOD", 2)
 
     url = f"{adhans_api_base_url}timingsByCity?date={date.day}-{date.month}-{date.year}&country={country}&city={city}&method={methode}"
@@ -167,6 +196,8 @@ def try_fetch_prayer_times(url):
             response_json = response.json()
             response.close()
             del response
+            del requests
+
             logger.info("Prayer times fetched successfully!")
             clean_memory()
             return response_json
@@ -178,29 +209,31 @@ def try_fetch_prayer_times(url):
                 raise
             else:
                 logger.warning("Failed to fetch prayer times, retrying...")
-                time.sleep(RETRIES_DELAY)
                 if response:
                     response.close()
                     del response
                 del requests
+                time.sleep(RETRIES_DELAY*retry_count)
                 requests = Session(socket_pool=get_radio_socketpool(esp), ssl_context=get_radio_ssl_context(esp))
                 clean_memory()
 
-def fetch_prayer_times(date: adafruit_date = None):
+def fetch_prayer_times(date: adafruit_date = None,
+                       city: str = getenv("CITY", "Montreal"),
+                       country: str = getenv("COUNTRY", "Canada"),
+                       state: str = getenv("STATE", ""),
+                       ):
     if date is None:
         date = adafruit_datetime.now().date()
-
-    url = construct_prayer_times_url(date)
-    clean_memory()
-
+    url = construct_prayer_times_url(date=date, city=city, country=country, state=state)
     return try_fetch_prayer_times(url)
 
 clean_memory()
 
 connect_to_wifi()
 fetch_and_set_rtc()
+current_ip_country, current_ip_city = fetch_location()
 prayers_date = today_date = adafruit_datetime.now().date()
-today_data = fetch_prayer_times(prayers_date)
+today_data = fetch_prayer_times(date=prayers_date, country=current_ip_country, city=current_ip_city)
 
 clean_memory()
 print("\n************************")
@@ -533,7 +566,7 @@ while True:
                 print(f"** Free memory: {mem_free()} **")
                 print("*******************************\n")
                 del today_data
-                today_data = fetch_prayer_times(prayers_date)
+                today_data = fetch_prayer_times(date=prayers_date, country=current_ip_country, city=current_ip_city)
                 clean_memory()
                 print("\n*******************************")
                 print(f"** Free memory: {mem_free()} **")
