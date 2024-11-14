@@ -11,12 +11,13 @@ from adafruit_bitmap_font import bitmap_font
 from adafruit_display_text.label import Label
 from micropython import const
 from adafruit_pyportal.graphics import Graphics
-from adafruit_pyportal import Peripherals
 from adafruit_esp32spi.adafruit_esp32spi import ESP_SPIcontrol
 from adafruit_connection_manager import get_radio_socketpool, get_radio_ssl_context
 from adafruit_datetime import date as adafruit_date, datetime as adafruit_datetime, time as adafruit_time
 from adafruit_logging import FileHandler, INFO, StreamHandler, getLogger
 from adafruit_requests import Session
+import audiocore
+import audioio
 # import adafruit_touchscreen
 
 clean_memory()
@@ -173,7 +174,7 @@ def construct_prayer_times_url(date, city, country, state):
     adhans_api_base_url = "https://api.aladhan.com/v1/"
     methode = getenv("CALCULATION_METHOD", 2)
 
-    url = f"{adhans_api_base_url}timingsByCity?date={date.day}-{date.month}-{date.year}&country={country}&city={city}&method={methode}"
+    url = f"{adhans_api_base_url}timingsByCity/{date.day}-{date.month}-{date.year}?country={country}&city={city}&method={methode}"
     if state:
         url += f"&state={state}"
 
@@ -225,7 +226,8 @@ def fetch_prayer_times(date: adafruit_date = None,
     if date is None:
         date = adafruit_datetime.now().date()
     url = construct_prayer_times_url(date=date, city=city, country=country, state=state)
-    return try_fetch_prayer_times(url)
+    data = try_fetch_prayer_times(url)
+    return data
 
 clean_memory()
 
@@ -234,6 +236,14 @@ fetch_and_set_rtc()
 current_ip_country, current_ip_city = fetch_location()
 prayers_date = today_date = adafruit_datetime.now().date()
 today_data = fetch_prayer_times(date=prayers_date, country=current_ip_country, city=current_ip_city)
+
+speaker_enable = DigitalInOut(board.SPEAKER_ENABLE)
+speaker_enable.switch_to_output(False)
+if hasattr(board, "AUDIO_OUT"):
+    audio = audioio.AudioOut(board.AUDIO_OUT)
+# elif hasattr(board, "SPEAKER"):
+else:
+    audio = audioio.AudioOut(board.SPEAKER)
 
 clean_memory()
 print("\n************************")
@@ -521,7 +531,14 @@ while True:
 
     if (next_adhan_time is not None) and (ct >= next_adhan_time):
         logger.info(f"Playing adhan {ADHANS[next_prayer]['name']} for {next_prayer} ... ")
-        Peripherals.play_file(file_name=ADHANS[next_prayer]['file'], wait_to_finish=True)
+        wavfile = open(file=ADHANS[next_prayer]['file'], mode="rb")
+        wavedata = audiocore.WaveFile(wavfile)
+        speaker_enable.value = True
+        audio.play(wavedata)
+        while audio.playing:
+            pass
+        wavfile.close()
+        speaker_enable.value = False
         logger.info(f"Adhan for {next_prayer} has finished. ")
         next_adhan_time = None
 
@@ -571,7 +588,6 @@ while True:
                 print("\n*******************************")
                 print(f"** Free memory: {mem_free()} **")
                 print("*******************************\n")
-
                 today_timings = None
 
     if next_prayer_time is not None:
