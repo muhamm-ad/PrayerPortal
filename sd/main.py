@@ -33,7 +33,7 @@ esp: ESP_SPIcontrol = ESP_SPIcontrol(
 )
 
 graphics = Graphics(
-        # default_bg="/sd/images/loading.bmp",
+        # default_bg="/sd/images/loading.bmp", # FIXME
         debug=True,
 )
 
@@ -481,6 +481,7 @@ next_adhan_time = None
 start = True
 all_prayers_passed = False
 localtile_refresh = time.monotonic()
+time_sec_until_next_prayer = ADHAN_MINUTES_BEFORE_PRAYER * 60 + 10
 
 # Set the splash screen as the root group for display
 board.DISPLAY.root_group = splash
@@ -529,7 +530,9 @@ while True:
 
     new_next_prayer, new_next_prayer_time = get_next_prayer(timings=today_timings, current_t=ct)
 
-    if (next_adhan_time is not None) and (ct >= next_adhan_time):
+    if ((next_adhan_time is not None)
+            and (ct >= next_adhan_time)
+            and (time_sec_until_next_prayer <= ADHAN_MINUTES_BEFORE_PRAYER * 60)):
         logger.info(f"Playing adhan {ADHANS[next_prayer]['name']} for {next_prayer} ... ")
         wavfile = open(file=ADHANS[next_prayer]['file'], mode="rb")
         wavedata = audiocore.WaveFile(wavfile)
@@ -599,21 +602,20 @@ while True:
             section1 = one_day_in_seconds - (
                     current_time.hour * 60 + current_time.minute) * 60 - current_time.second
             section2 = (next_prayer_time.hour * 60 + next_prayer_time.minute) * 60
-            time_until_next_prayer = section1 + section2
+            time_sec_until_next_prayer = section1 + section2
         else:
             # Calculate time until the next prayer within the same day
-            time_until_next_prayer = (next_prayer_time.hour * 60 + next_prayer_time.minute) * 60 - \
-                                     (current_time.hour * 60 + current_time.minute) * 60 - current_time.second
+            time_sec_until_next_prayer = (next_prayer_time.hour * 60 + next_prayer_time.minute) * 60 - \
+                                         (current_time.hour * 60 + current_time.minute) * 60 - current_time.second
 
-        time_until_next_adhan = time_until_next_prayer - (
-                ADHAN_MINUTES_BEFORE_PRAYER * 60)  # FIXME : can be negative
-        logger.info(f"RTC: {adafruit_datetime.now()} ")
-        logger.info(f"Time until next adhan: {time_until_next_adhan} seconds ")
-        logger.info(f"Time until next prayer: {time_until_next_prayer} seconds ")
-        # time.sleep(time_until_next_adhan if time_until_next_adhan > 0 else time_until_next_prayer)
+        time_sec_until_next_adhan = time_sec_until_next_prayer - (ADHAN_MINUTES_BEFORE_PRAYER * 60)  # FIXME : can be negative
+        # logger.info(f"RTC: {adafruit_datetime.now()} ")
+        # logger.info(f"Time until next adhan: {time_sec_until_next_adhan} seconds ")
+        # logger.info(f"Time until next prayer: {time_sec_until_next_prayer} seconds ")
+        # time.sleep(time_sec_until_next_adhan if time_sec_until_next_adhan > 0 else time_sec_until_next_prayer)
 
         # update next prayer countdown label
-        hours = time_until_next_prayer // 3600
-        minutes = (time_until_next_prayer % 3600) // 60
+        hours = time_sec_until_next_prayer // 3600
+        minutes = (time_sec_until_next_prayer % 3600) // 60
         np_countdown_label.text = f"{hours:02d} h {minutes:02d} m"
         np_countdown_label.x = 240 + (240 - np_countdown_label.bounding_box[2]) // 2

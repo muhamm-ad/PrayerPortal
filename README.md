@@ -52,8 +52,8 @@ the device's screen, and play the Adhan (Islamic call to prayer) at the appropri
    ```
 
 4. **Upload Code**: 
-- Copy the content of the sd directory into your SD card.
-- Upload the `content` of the [CIRCUITPY](CIRCUITPY) directory to the PyPortal Titano.
+   - Copy the content of the sd directory into your SD card.
+   - Upload the `content` of the [CIRCUITPY](CIRCUITPY) directory to the PyPortal Titano.
 5. **Run the Program**: Power on the PyPortal Titano, and it will automatically connect to Wi-Fi, fetch the prayer
    times, and display them on the screen.
 
