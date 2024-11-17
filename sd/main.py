@@ -522,7 +522,7 @@ while True:
                 prayer_time_labels[prayer].x = (i * 96) + (
                         96 - prayer_time_labels[prayer].bounding_box[2]) // 2  # Recenter the text
 
-    if all_prayers_passed:
+    if all_prayers_passed or (next_prayer == 'Fajr'):
         all_prayers_passed = False
         ct = adafruit_time(hour=00, minute=00, second=00)
     else:
