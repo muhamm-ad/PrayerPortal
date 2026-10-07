@@ -25,7 +25,7 @@ print("\n*******************************")
 print(f"** Free memory: {mem_free()} **")
 print("*******************************\n")
 
-esp: ESP_SPIcontrol = ESP_SPIcontrol(
+esp = ESP_SPIcontrol(
         board.SPI(),
         DigitalInOut(board.ESP_CS),
         DigitalInOut(board.ESP_BUSY),
@@ -99,27 +99,39 @@ def disconnect_from_wifi():
             logger.error(f"Failed to disconnect from Wi-Fi: {e} ")
             raise
 
-def fetch_and_set_rtc():
-    requests = Session(socket_pool=get_radio_socketpool(esp), ssl_context=get_radio_ssl_context(esp))
-    api_url = "https://api.coindesk.com/v1/bpi/currentprice/USD.json"
-    logger.info(f"Fetching time from {api_url} ...")
-    response = None
+def recover_esp():
+    """Reset a hung ESP32 co-processor and reconnect Wi-Fi."""
+    logger.warning("Resetting ESP32 after network failure ... ")
+    try:
+        esp.reset()
+    except Exception as e:
+        logger.error(f"ESP32 reset failed: {e} ")
+    time.sleep(2)
+    connect_to_wifi()
+    clean_memory()
+
+def fetch_and_set_rtc(timezone="UTC", utc_offset_seconds=0):
+    # Prefer NTP over HTTPS time APIs: TLS often hangs the PyPortal ESP32 SPI stack.
     retry_count = 0
     while retry_count < MAX_RETRIES:
         try:
-            response = requests.get(url=api_url, stream=True)
-            respond_json = response.json()
-            response.close()
-            del response
-            del requests
-            # Parse the ISO time string from the CoinDesk API
-            iso_time_str = respond_json["time"]["updatedISO"]
-            # Parse the datetime
-            parsed_time = adafruit_datetime.fromisoformat(iso_time_str)
-            # Set the RTC
-            rtc.RTC().datetime = parsed_time.timetuple()
-            logger.info(f"RTC has been set to {parsed_time} ")
-
+            connect_to_wifi()
+            logger.info(
+                f"Syncing RTC via NTP for {timezone} (UTC offset {utc_offset_seconds}s) ..."
+            )
+            ntp_unix = esp.get_time()[0]
+            local_unix = ntp_unix + int(utc_offset_seconds)
+            t = time.localtime(local_unix)
+            parsed_time = adafruit_datetime(
+                year=t.tm_year,
+                month=t.tm_mon,
+                day=t.tm_mday,
+                hour=t.tm_hour,
+                minute=t.tm_min,
+                second=t.tm_sec,
+            )
+            rtc.RTC().datetime = t
+            logger.info(f"RTC has been set to {parsed_time} ({timezone}) ")
             clean_memory()
             return parsed_time
         except Exception as e:
@@ -127,19 +139,15 @@ def fetch_and_set_rtc():
             if retry_count == MAX_RETRIES:
                 logger.error(f"Failed to fetch and set RTC: {e} ")
                 raise
-            else:
-                logger.warning("Failed to fetch and set RTC, retrying ... ")
-                if response:
-                    response.close()
-                    del response
-                del requests
-                time.sleep(RETRIES_DELAY * retry_count)
-                requests = Session(socket_pool=get_radio_socketpool(esp), ssl_context=get_radio_ssl_context(esp))
-                clean_memory()
+            logger.warning("Failed to fetch and set RTC, retrying ... ")
+            recover_esp()
+            time.sleep(RETRIES_DELAY * retry_count)
+            clean_memory()
 
 def fetch_location():
     requests = Session(socket_pool=get_radio_socketpool(esp), ssl_context=get_radio_ssl_context(esp))
-    api_url = "http://ip-api.com/json/"
+    # `offset` is not in ip-api's default fields; request it explicitly.
+    api_url = "http://ip-api.com/json/?fields=status,message,country,city,timezone,offset"
     logger.info(f"Fetching location from {api_url} ...")
     response = None
     retry_count = 0
@@ -150,24 +158,33 @@ def fetch_location():
             response.close()
             del response
             del requests
-            logger.info(f"Location is fetched successfully")
+            if respond_json.get("status") == "fail":
+                raise RuntimeError(respond_json.get("message", "ip-api lookup failed"))
+            timezone = respond_json.get("timezone", "UTC")
+            if "offset" not in respond_json:
+                raise RuntimeError("ip-api response missing UTC offset")
+            utc_offset = int(respond_json["offset"])
+            logger.info(
+                f"Location fetched: {respond_json['city']}, {respond_json['country']} "
+                f"({timezone}, offset {utc_offset}s)"
+            )
 
             clean_memory()
-            return respond_json["country"], respond_json["city"]
+            return respond_json["country"], respond_json["city"], timezone, utc_offset
         except Exception as e:
             retry_count += 1
             if retry_count == MAX_RETRIES:
                 logger.error(f"Failed to fetch location: {e} ")
                 raise
-            else:
-                logger.warning("Failed to fetch location, retrying ... ")
-                if response:
-                    response.close()
-                    del response
-                del requests
-                time.sleep(RETRIES_DELAY * retry_count)
-                requests = Session(socket_pool=get_radio_socketpool(esp), ssl_context=get_radio_ssl_context(esp))
-                clean_memory()
+            logger.warning("Failed to fetch location, retrying ... ")
+            if response:
+                response.close()
+                del response
+            del requests
+            recover_esp()
+            time.sleep(RETRIES_DELAY * retry_count)
+            requests = Session(socket_pool=get_radio_socketpool(esp), ssl_context=get_radio_ssl_context(esp))
+            clean_memory()
 
 
 def construct_prayer_times_url(date, city, country, state):
@@ -214,6 +231,7 @@ def try_fetch_prayer_times(url):
                     response.close()
                     del response
                 del requests
+                recover_esp()
                 time.sleep(RETRIES_DELAY*retry_count)
                 requests = Session(socket_pool=get_radio_socketpool(esp), ssl_context=get_radio_ssl_context(esp))
                 clean_memory()
@@ -232,8 +250,12 @@ def fetch_prayer_times(date: adafruit_date = None,
 clean_memory()
 
 connect_to_wifi()
-fetch_and_set_rtc()
-current_ip_country, current_ip_city = fetch_location()
+current_ip_country, current_ip_city, current_timezone, current_utc_offset = fetch_location()
+current_timezone = getenv("TIMEZONE", current_timezone)
+offset_env = getenv("UTC_OFFSET")
+if offset_env is not None:
+    current_utc_offset = int(offset_env)
+fetch_and_set_rtc(current_timezone, current_utc_offset)
 prayers_date = today_date = adafruit_datetime.now().date()
 today_data = fetch_prayer_times(date=prayers_date, country=current_ip_country, city=current_ip_city)
 
@@ -490,7 +512,7 @@ clean_memory()
 while True:
     # only query the online time once per hour (and on first run)
     if (time.monotonic() - localtile_refresh) > 3600:
-        fetch_and_set_rtc()
+        fetch_and_set_rtc(current_timezone, current_utc_offset)
         localtile_refresh = time.monotonic()
 
     # update time label

@@ -2,3 +2,9 @@
 # Wi-Fi Configuration
 CIRCUITPY_WIFI_SSID = "your_wifi_ssid"
 CIRCUITPY_WIFI_PASSWORD = "your_wifi_password"
+
+# Optional: IANA timezone override (default: auto from IP geolocation)
+# TIMEZONE = "America/Montreal"
+
+# Optional: UTC offset in seconds if TIMEZONE is overridden (e.g. -14400 for EDT)
+# UTC_OFFSET = "-14400"
