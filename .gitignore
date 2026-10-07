@@ -130,6 +130,10 @@ ENV/
 env.bak/
 venv.bak/
 
+# Local device secrets (copy from settings.toml.example)
+CIRCUITPY/settings.toml
+
+
 # Spyder project settings
 .spyderproject
 .spyproject

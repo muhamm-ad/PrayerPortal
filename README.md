@@ -27,17 +27,14 @@ the device's screen, and play the Adhan (Islamic call to prayer) at the appropri
 ## Setup Instructions
 
 1. **Install CircuitPython**:
-   Follow [Adafruit's guide](https://learn.adafruit.com/adafruit-pyportal-titano/circuitpython) to install CircuitPython
-   on the PyPortal Titano.
+   Follow [Adafruit's guide](https://learn.adafruit.com/adafruit-pyportal-titano/circuitpython) to install CircuitPython on the PyPortal Titano.
 
 2. **Configure Settings**:
-   In the [settings.toml](CIRCUITPY/settings.toml) file, update:
-
-    - **Wi-Fi**: Your Wi-Fi credentials.
-    - **Location**: Set your geographic location.
+   Copy [settings.toml.example](CIRCUITPY/settings.toml.example) to `CIRCUITPY/settings.toml`, then update:
+   - **Wi-Fi**: Your Wi-Fi credentials.
+   - **Location**: Set your geographic location.
 
 3. **Install Required Libraries**:
-
    Install the necessary CircuitPython libraries by running the following command in the [root of this project](./):
 
    ```cli
@@ -46,19 +43,18 @@ the device's screen, and play the Adhan (Islamic call to prayer) at the appropri
    ```
 
 4. **Upload Code**:
-    - Copy the content of the sd directory into your SD card.
-    - Upload the `content` of the [CIRCUITPY](CIRCUITPY) directory to the PyPortal Titano.
-5. **Run the Program**: Power on the PyPortal Titano, and it will automatically connect to Wi-Fi, fetch the prayer
-   times, and display them on the screen.
+   - Copy the content of the sd directory into your SD card.
+   - Upload the `content` of the [CIRCUITPY](CIRCUITPY) directory to the PyPortal Titano.
+
+5. **Run the Program**:
+   Power on the PyPortal Titano, and it will automatically connect to Wi-Fi, fetch the prayer times, and display them on the screen.
 
 ## How It Works
 
 1. **Wi-Fi Connection**: The PyPortal Titano connects to the internet using your Wi-Fi credentials.
-2. **Fetching Prayer Times**: The device requests prayer times from the [Aladhan API](https://api.aladhan.com/) based on
-   your location.
+2. **Fetching Prayer Times**: The device requests prayer times from the [Aladhan API](https://api.aladhan.com/) based on your location.
 3. **Displaying Times**: The screen displays the prayer times for the day, updated regularly.
-4. **Playing Adhan**: The Adhan is played `5 min` before each prayer time through the built-in speaker or a connected
-   speaker.
+4. **Playing Adhan**: The Adhan is played `5 min` before each prayer time through the built-in speaker or a connected speaker.
 
 ## License
 
