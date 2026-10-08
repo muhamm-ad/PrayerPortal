@@ -59,11 +59,25 @@ SECRETS = {
     "password": getenv("CIRCUITPY_WIFI_PASSWORD"),
 }
 
+
+
+def env_flag(name, default=True):
+    """Read an on/off setting from settings.toml (0, false, off and no mean off)."""
+    value = getenv(name)
+    if value is None:
+        return default
+    return str(value).strip().lower() not in ("0", "false", "off", "no")
+
+
 # ------------- Logging ------------- #
+# Every message goes to the SD card; TERMINAL_LOGS (on by default) also prints it to the serial console.
 logger = getLogger("PrayerPortal")
+console_logs = env_flag("TERMINAL_LOGS")
 try:
     logger.addHandler(RotatingFileHandler(LOG_FILE, maxBytes=LOG_MAX_BYTES, backupCount=1))
 except OSError:
+    console_logs = True  # no log file: keep the console so nothing is lost
+if console_logs:
     logger.addHandler(StreamHandler())
 logger.setLevel(INFO)
 
@@ -90,6 +104,7 @@ def set_image(group, filename):
     if not filename:
         return None  # we're done, no icon desired
 
+    logger.info(f"Set image {filename} ")
     image_file = open(filename, "rb")
     image = displayio.OnDiskBitmap(image_file)
     image.pixel_shader.make_transparent(0)
@@ -121,9 +136,7 @@ def show_day(tiles, gregorian_label, hijri_label, times, gregorian, hijri):
 
 def log_memory(tag):
     clean_memory()
-    message = f"{tag} - free memory: {mem_free()} B"
-    print(message)
-    logger.info(message)
+    logger.info(f"{tag} - free memory: {mem_free()} B")
 
 
 def fatal(err, reset=True):
@@ -137,11 +150,11 @@ def fatal(err, reset=True):
         show_status(message)
     except Exception:
         pass
-    try:
+    try:  # the traceback always goes to the console, whatever TERMINAL_LOGS says
         import traceback
         traceback.print_exception(err)
     except Exception:
-        print(message)
+        pass
     if not reset:  # e.g. missing settings: editing settings.toml reloads the code
         while True:
             time.sleep(1)
@@ -240,7 +253,7 @@ def fetch_day(ymd, city, country, state, method, quick=False):
     body = get_json(url, check_aladhan, quick)
     day = pl.parse_day(body["data"], ymd)  # keep 5 numbers and 2 strings, drop the rest
     del body
-    clean_memory()
+    log_memory(f"Prayer times for {ymd[0]}-{ymd[1]:02d}-{ymd[2]:02d} fetched")
     return day
 
 
@@ -545,12 +558,15 @@ def main():
             # Next prayer, its adhan and the countdown to it.
             next_idx, prayer_s = pl.next_prayer(now_s, times, tomorrow[0] if tomorrow else None)
             adhan_s = prayer_s - ADHAN_LEAD_S
+            previous = trigger.key
             if trigger.update(next_idx, prayer_s, now_s):
                 if playing is None:
                     playing = play_adhan(audio, speaker_enable, adhan_files[next_idx])
             if trigger.changed:
-                logger.info(f"Next prayer is {pl.PRAYERS[next_idx]} at {pl.fmt_hm(prayer_s)}, "
-                            f"adhan at {pl.fmt_hm(adhan_s)} ")
+                if previous is not None and previous[0] != next_idx:
+                    logger.info(f"{pl.PRAYERS[previous[0]]} ({pl.fmt_hm(previous[1])}) has passed. ")
+                logger.info(f"RTC {pl.fmt_hm(now_s)}:{now_s % 60:02d} - next prayer is {pl.PRAYERS[next_idx]} "
+                            f"at {pl.fmt_hm(prayer_s)}, adhan at {pl.fmt_hm(adhan_s)} ")
 
             set_text(ct_label, pl.fmt_hm(now_s), 0, 240)
             set_text(np_name_label, pl.PRAYERS[next_idx], 240, 240)
