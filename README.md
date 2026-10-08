@@ -11,7 +11,10 @@ the device's screen, and play the Adhan (Islamic call to prayer) at the appropri
 
 - **Automatic Prayer Times Fetching**: Connects to the internet to retrieve accurate prayer times for your location.
 - **Prayer Times Display**: Shows the current time and all daily prayer times on the screen.
-- **Adhan Alert**: Plays the Adhan at each prayer time.
+- **Adhan Alert**: Plays the Adhan 5 minutes before each prayer, without freezing the clock.
+- **Next Prayer Countdown**: Shows the next prayer, the time of its Adhan and the time left until then.
+- **Custom Adhan**: Pick a different recording for each prayer by touching the screen.
+- **Resilient**: Network failures are retried, errors are shown on screen, and logs are kept on the SD card.
 
 ## Hardware Required
 
@@ -32,7 +35,8 @@ the device's screen, and play the Adhan (Islamic call to prayer) at the appropri
 2. **Configure Settings**:
    Copy [settings.toml.example](CIRCUITPY/settings.toml.example) to `CIRCUITPY/settings.toml`, then update:
    - **Wi-Fi**: Your Wi-Fi credentials.
-   - **Location**: Set your geographic location.
+   - **Location** (optional): `CITY`, `COUNTRY` and `STATE`. By default the location is detected from your IP address.
+   - Other optional settings (calculation method, UTC offset, night dimming) are described in the example file.
 
 3. **Install Required Libraries**:
    Install the necessary CircuitPython libraries by running the following command in the [root of this project](./):
@@ -49,12 +53,31 @@ the device's screen, and play the Adhan (Islamic call to prayer) at the appropri
 5. **Run the Program**:
    Power on the PyPortal Titano, and it will automatically connect to Wi-Fi, fetch the prayer times, and display them on the screen.
 
+## Usage
+
+- **Choose an Adhan**: Tap a prayer on the top row to select it, then tap the footer (bottom left) to cycle through the
+  `.wav` files in `sd/adhans`. The footer shows the Adhan of the selected prayer, and the choice is saved in
+  `/sd/adhans.json`. The selection returns to the next prayer after 10 seconds.
+- **Logs**: Written to `/sd/PrayerPortal.log` on the SD card, rotated at 64 KB (one backup: `PrayerPortal.log.1`).
+- **Errors**: Shown in the footer. After an unrecoverable error the device reboots by itself after 30 seconds.
+
 ## How It Works
 
 1. **Wi-Fi Connection**: The PyPortal Titano connects to the internet using your Wi-Fi credentials.
 2. **Fetching Prayer Times**: The device requests prayer times from the [Aladhan API](https://api.aladhan.com/) based on your location.
-3. **Displaying Times**: The screen displays the prayer times for the day, updated regularly.
+3. **Displaying Times**: The screen displays the prayer times for the day. The next day's times are fetched after Isha
+   and shown at midnight. The clock is re-synchronized every hour.
 4. **Playing Adhan**: The Adhan is played `5 min` before each prayer time through the built-in speaker or a connected speaker.
+   The countdown on the screen points to that moment.
+
+## Development
+
+The scheduling logic lives in [sd/prayer_logic.py](sd/prayer_logic.py) and has no hardware dependency, so it can be
+tested on a computer:
+
+```cli
+python3 -I -m unittest discover -s tests
+```
 
 ## License
 
