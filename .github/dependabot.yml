@@ -9,7 +9,21 @@ updates:
       - dependency-type: "all"
     labels:
       - "dependencies"
-      
+      - "pip"
+    groups:
+      adafruit:
+        patterns:
+          - "adafruit*"
+          - "neopixel"
+          - "simpleio"
+      python-other:
+        patterns:
+          - "*"
+        exclude-patterns:
+          - "adafruit*"
+          - "neopixel"
+          - "simpleio"
+
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
@@ -17,3 +31,8 @@ updates:
     open-pull-requests-limit: 5
     labels:
       - "dependencies"
+      - "gh-actions"
+    groups:
+      github-actions:
+        patterns:
+          - "*"
