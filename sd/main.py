@@ -120,8 +120,14 @@ def set_text(label, text, x0, width):
 
 
 def show_status(text, hold=0):
-    """Show a short message in the footer; with hold, keep it for that many seconds."""
+    """Show a short message in the footer; with hold, keep it for that many seconds.
+
+    Until the interface is up the screen shows the terminal, so the message goes to the log instead.
+    """
     global footer_hold_until
+    if status_label is None:
+        logger.info(text)
+        return
     status_label.text = text[:38]  # stay clear of the footer icons
     footer_hold_until = time.time() + hold if hold else 0
 
@@ -146,15 +152,15 @@ def fatal(err, reset=True):
         logger.error(message)
     except Exception:
         pass
-    try:
-        show_status(message)
+    try:  # show the terminal again so the error can be read on the PyPortal
+        board.DISPLAY.root_group = displayio.CIRCUITPYTHON_TERMINAL
     except Exception:
         pass
     try:  # the traceback always goes to the console, whatever TERMINAL_LOGS says
         import traceback
         traceback.print_exception(err)
     except Exception:
-        pass
+        print(message)
     if not reset:  # e.g. missing settings: editing settings.toml reloads the code
         while True:
             time.sleep(1)
@@ -366,7 +372,7 @@ def play_adhan(audio, speaker_enable, filename):
 # ------------- Run ------------- #
 
 def main():
-    global esp, utc_offset, offset_fixed, footer_hold_until
+    global esp, utc_offset, offset_fixed, footer_hold_until, status_label
     log_memory("Boot")
 
     if SECRETS["ssid"] is None or SECRETS["password"] is None:
@@ -420,6 +426,8 @@ def main():
     adhan_files = load_adhans(available)
 
     # --- Screen ---
+    font_16 = bitmap_font.load_font("/sd/fonts/Helvetica-Bold-16.bdf")
+    font_16.load_glyphs("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 :'-.,()/!")
     font_24 = bitmap_font.load_font("/sd/fonts/Helvetica-Bold-24-AlphaNum.bdf")
     font_24.load_glyphs("FajrDhuhrAsrMaghribIsha0123456789 :hm")
     font_48 = bitmap_font.load_font("/sd/fonts/Helvetica-Bold-48-CurrentTime.bdf")
@@ -435,23 +443,22 @@ def main():
 
     tiles = []  # one time label per prayer
     for _ in range(5):
-        tile = Label(y=71, font=FONT_16, color=WHITE)
+        tile = Label(y=71, font=font_16, color=WHITE)
         splash.append(tile)
         tiles.append(tile)
     ct_label = Label(y=151, font=font_48, color=WHITE)
-    gregorian_label = Label(y=242, font=FONT_16, color=WHITE)
-    hijri_label = Label(y=274, font=FONT_16, color=WHITE)
+    gregorian_label = Label(y=242, font=font_16, color=WHITE)
+    hijri_label = Label(y=274, font=font_16, color=WHITE)
     np_name_label = Label(y=127, font=font_24, color=WHITE)
     np_adhan_label = Label(y=198, font=font_24, color=WHITE)
     np_countdown_label = Label(y=269, font=font_24, color=WHITE)
     for label in (ct_label, gregorian_label, hijri_label, np_name_label, np_adhan_label, np_countdown_label):
         splash.append(label)
-    boot.remove(status_label)
+    status_label = Label(x=28, y=307, font=font_16, color=WHITE)
     splash.append(status_label)
 
     show_day(tiles, gregorian_label, hijri_label, times, gregorian, hijri)
-    board.DISPLAY.root_group = splash
-    boot_file.close()  # the loading image is no longer displayed
+    board.DISPLAY.root_group = splash  # replaces the terminal shown since boot
     clean_memory()
 
     night_level = None  # optional: NIGHT_BRIGHTNESS (percent) dims the screen at night
@@ -594,15 +601,9 @@ def main():
         time.sleep(0.1)  # also the touch polling period
 
 
-# The loading screen is shown first so that startup errors are visible.
+# No root group is set until the interface is ready: the screen shows the CircuitPython terminal,
+# so the log lines and any startup error can be read on the PyPortal itself.
 board.DISPLAY.rotation = 0
-FONT_16 = bitmap_font.load_font("/sd/fonts/Helvetica-Bold-16.bdf")
-FONT_16.load_glyphs("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 :'-.,()/!")
-boot = displayio.Group()
-boot_file = set_image(boot, "/sd/images/loading.bmp")
-status_label = Label(x=28, y=307, font=FONT_16, color=WHITE, text="Starting ...")
-boot.append(status_label)
-board.DISPLAY.root_group = boot
 
 try:
     main()

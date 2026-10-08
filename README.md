@@ -51,15 +51,15 @@ the device's screen, and play the Adhan (Islamic call to prayer) at the appropri
    - Upload the `content` of the [CIRCUITPY](CIRCUITPY) directory to the PyPortal Titano.
 
 5. **Run the Program**:
-   Power on the PyPortal Titano, and it will automatically connect to Wi-Fi, fetch the prayer times, and display them on the screen.
+   Power on the PyPortal Titano, and it will automatically connect to Wi-Fi, fetch the prayer times, and display them on the screen. While it starts, the screen shows the terminal with the log; the interface replaces it once everything is ready.
 
 ## Usage
 
 - **Choose an Adhan**: Tap a prayer on the top row to select it, then tap the footer (bottom left) to cycle through the
   `.wav` files in [`sd/adhans`](sd/adhans). The footer shows the Adhan of the selected prayer, and the choice is saved in
   [`/sd/adhans.json`](sd/adhans.json). The selection returns to the next prayer after 10 seconds.
-- **Logs**: Written to [`/sd/PrayerPortal.log`](sd/PrayerPortal.log) on the SD card, rotated at 64 KB (one backup: [`PrayerPortal.log.1`](sd/PrayerPortal.log.1)). The same lines are printed to the serial console; set `TERMINAL_LOGS = 0` in `settings.toml` to turn the console output off.
-- **Errors**: Shown in the footer. After an unrecoverable error the device reboots by itself after 30 seconds.
+- **Logs**: Written to [`/sd/PrayerPortal.log`](sd/PrayerPortal.log) on the SD card, rotated at 64 KB (one backup: [`PrayerPortal.log.1`](sd/PrayerPortal.log.1)). The same lines are printed to the serial console and shown in the terminal on the PyPortal screen while it starts; set `TERMINAL_LOGS = 0` in `settings.toml` to turn this output off.
+- **Errors**: Startup and unrecoverable errors are shown in the terminal on the screen, minor ones in the footer. After an unrecoverable error the device reboots by itself after 30 seconds.
 
 ## How It Works
 

@@ -6,7 +6,7 @@ Listed by order of importance.
 
 - [X] **Error Handling**: Implement robust error handling for connectivity issues, API failures, and other potential errors.
   - Failed requests are retried; a failed refresh keeps the previous data and is retried every 5 minutes.
-  - Fatal errors are shown in the footer and logged, then the device reboots after 30 seconds.
+  - Fatal errors are shown in the terminal on the screen and logged, then the device reboots after 30 seconds.
 
 - [X] **Mount Log Files to SD Card**: Mount log files to an SD card and configure a cleaning cycle for the log files to optimize memory usage.
   - Logs go to [`/sd/PrayerPortal.log`](sd/PrayerPortal.log), rotated at 64 KB with one backup ([`PrayerPortal.log.1`](sd/PrayerPortal.log.1)).

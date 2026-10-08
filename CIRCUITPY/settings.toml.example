@@ -21,6 +21,6 @@ CIRCUITPY_WIFI_PASSWORD = "your_wifi_password"
 # Optional: dim the screen from 1 h after Isha until 1 h before Fajr (percentage, 5-100)
 # NIGHT_BRIGHTNESS = 30
 
-# Optional: also print the log to the serial console, in addition to the file on the SD card
-# (1 = yes, 0 = no; default: 1)
+# Optional: also print the log to the serial console and to the terminal shown on the screen while the
+# device starts, in addition to the file on the SD card (1 = yes, 0 = no; default: 1)
 # TERMINAL_LOGS = 1
