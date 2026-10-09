@@ -35,6 +35,8 @@ RETRY_AFTER_S = const(300)  # wait before retrying a failed refresh
 SYNC_EVERY_S = const(3600)  # NTP / UTC offset refresh period
 RESET_AFTER_S = const(30)  # delay before rebooting after a fatal error
 HOLD_S = const(10)  # how long a footer message / selected prayer stays shown
+HIGHLIGHT = const(0xFFC832)  # outline colour for a touched prayer / the footer
+FLASH_S = 0.35  # how long the footer outline stays after a tap
 MIN_VALID_UNIX = 1700000000  # the ESP32 reports ~0 until its NTP sync completes
 
 ADHAN_LEAD_S = const(300)  # the adhan plays 5 minutes before the prayer
@@ -148,6 +150,25 @@ def set_image(group, filename):
     image.pixel_shader.make_transparent(0)
     group.append(displayio.TileGrid(image, pixel_shader=image.pixel_shader))
     return image_file
+
+
+def make_frame(x, y, width, height, thickness):
+    """A hollow rectangle made of four thin strips (hidden at first).
+
+    Strips, not one big bitmap: the background is read from the SD card each time a screen area
+    is redrawn, so a thin outline is redrawn much faster than a filled rectangle.
+    """
+    palette = displayio.Palette(2)
+    palette[0] = HIGHLIGHT
+    horizontal = displayio.Bitmap(width, thickness, 2)
+    vertical = displayio.Bitmap(thickness, height - 2 * thickness, 2)
+    frame = displayio.Group(x=x, y=y)
+    frame.append(displayio.TileGrid(horizontal, pixel_shader=palette))
+    frame.append(displayio.TileGrid(horizontal, pixel_shader=palette, y=height - thickness))
+    frame.append(displayio.TileGrid(vertical, pixel_shader=palette, y=thickness))
+    frame.append(displayio.TileGrid(vertical, pixel_shader=palette, x=width - thickness, y=thickness))
+    frame.hidden = True
+    return frame
 
 
 def set_text(label, text, x0, width):
@@ -501,6 +522,10 @@ def main():
         splash.append(label)
     status_label = Label(x=28, y=307, font=font_16, color=WHITE)
     splash.append(status_label)
+    select_frame = make_frame(3, 3, 90, 75, 3)  # around the selected prayer (moved with .x)
+    flash_frame = make_frame(3, 294, 374, 23, 2)  # around the footer, flashes when it is tapped
+    splash.append(select_frame)
+    splash.append(flash_frame)
 
     show_day(tiles, gregorian_label, hijri_label, times, gregorian, hijri)
     clean_memory()
@@ -524,6 +549,7 @@ def main():
     next_fetch = 0  # earliest time for the next prayer-times request
     last_epoch = -1
     last_touch = 0.0
+    flash_until = 0.0
     ui_shown = False  # the terminal stays on screen until the first pass has filled every label
     save_pending = False  # adhan choice waiting to be saved once no adhan is playing
 
@@ -533,20 +559,29 @@ def main():
         if point is not None and time.monotonic() - last_touch > 0.6:
             last_touch = time.monotonic()
             now = time.time()
-            if point[1] < 75:
+            if point[1] < 80:  # the prayer row ends at y = 79
                 shown = min(point[0] // 96, 4)
                 shown_until = now + HOLD_S
                 footer_hold_until = 0
+                select_frame.x = shown * 96 + 3
+                select_frame.hidden = False
                 status_label.text = adhan_footer(adhan_files, shown, next_idx)
-            elif point[1] >= 295 and point[0] < 380 and available:
+            elif point[1] >= 293 and point[0] < 380 and available:
                 if now >= shown_until:
                     shown = next_idx
                 adhan_files[shown] = pl.cycle(available, adhan_files[shown])
                 save_pending = True
                 shown_until = now + HOLD_S
                 footer_hold_until = 0
+                select_frame.x = shown * 96 + 3  # which prayer's adhan was changed
+                select_frame.hidden = False
+                flash_frame.hidden = False
+                flash_until = last_touch + FLASH_S
                 status_label.text = adhan_footer(adhan_files, shown, next_idx)
                 logger.info(f"{pl.PRAYERS[shown]} adhan set to {adhan_files[shown]} ")
+
+        if not flash_frame.hidden and time.monotonic() >= flash_until:
+            flash_frame.hidden = True
 
         epoch = time.time()
         if epoch != last_epoch:  # once per second
@@ -633,6 +668,9 @@ def main():
             set_text(np_name_label, pl.PRAYERS[next_idx], 240, 240)
             set_text(np_adhan_label, pl.fmt_hm(adhan_s), 240, 240)
             set_text(np_countdown_label, pl.fmt_countdown(adhan_s - now_s), 240, 240)
+
+            if not select_frame.hidden and epoch >= shown_until:
+                select_frame.hidden = True
 
             if epoch >= footer_hold_until:
                 text = adhan_footer(adhan_files, shown if epoch < shown_until else next_idx, next_idx)
