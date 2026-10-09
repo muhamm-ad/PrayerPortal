@@ -132,12 +132,16 @@ def show_status(text, hold=0):
     footer_hold_until = time.time() + hold if hold else 0
 
 
-def show_day(tiles, gregorian_label, hijri_label, times, gregorian, hijri):
+def show_times(tiles, times, tag="Prayer times"):
     for i in range(5):
         set_text(tiles[i], pl.fmt_hm(times[i]), i * 96, 96)
+    logger.info(f"{tag}: " + ", ".join(f"{pl.PRAYERS[i]} {pl.fmt_hm(times[i])}" for i in range(5)))
+
+
+def show_day(tiles, gregorian_label, hijri_label, times, gregorian, hijri):
+    show_times(tiles, times)
     set_text(gregorian_label, gregorian, 0, 240)
     set_text(hijri_label, hijri, 0, 240)
-    logger.info("Prayer times: " + ", ".join(f"{pl.PRAYERS[i]} {pl.fmt_hm(times[i])}" for i in range(5)))
 
 
 def log_memory(tag):
@@ -532,7 +536,7 @@ def main():
                 try:
                     tomorrow_ymd = local_ymd(epoch + pl.DAY_S)
                     tomorrow = fetch_day(tomorrow_ymd, city, country, state, method, quick=True)
-                    logger.info("Tomorrow's prayer times are ready. ")
+                    show_times(tiles, tomorrow[0], "Tomorrow's prayer times")  # shown now, the date changes at midnight
                 except Exception as e:
                     logger.error(f"Tomorrow's prayer times unavailable: {e} ")
                     show_status("Prayer times: retrying", HOLD_S)

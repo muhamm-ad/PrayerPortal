@@ -64,7 +64,7 @@
 
 1. **Wi-Fi Connection**: The PyPortal Titano connects to the internet using your Wi-Fi credentials.
 2. **Fetching Prayer Times**: The device requests prayer times from the [Aladhan API](https://api.aladhan.com/) based on your location.
-3. **Displaying Times**: The screen displays the prayer times for the day. The next day's times are fetched after Isha and shown at midnight. The clock is re-synchronized every hour.
+3. **Displaying Times**: The screen displays the prayer times for the day. The next day's times are fetched after Isha and shown as soon as they arrive; the date changes at midnight. The clock is re-synchronized every hour.
 4. **Playing Adhan**: The Adhan is played `5 min` before each prayer time through the built-in speaker or a connected speaker. The countdown on the screen points to that moment.
 
 ## Development
