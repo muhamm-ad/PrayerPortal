@@ -69,12 +69,50 @@ def env_flag(name, default=True):
     return str(value).strip().lower() not in ("0", "false", "off", "no")
 
 
+# ------------- Sharing the SD card ------------- #
+# The screen images, the adhan WAV files and the log file all live on the SD card, and the card shares its
+# SPI bus with the ESP32. The screen refresh and the audio buffers read the card in the background: if one of
+# them runs while the main code holds the bus (an SD write, a Wi-Fi request), the board hangs or resets.
+# So the screen refresh is paused around those operations, and nothing touches the card while an adhan plays.
+audio_out = None  # set once the speaker is ready
+
+
+class DisplayPaused:
+    """`with DisplayPaused():` stops the background screen refresh for the length of the block."""
+
+    def __enter__(self):
+        self.previous = board.DISPLAY.auto_refresh
+        board.DISPLAY.auto_refresh = False
+
+    def __exit__(self, *exc):
+        board.DISPLAY.auto_refresh = self.previous
+        return False
+
+
+class SDLogHandler(RotatingFileHandler):
+    """Rotating log file on the SD card. While an adhan plays, lines wait in memory and are written after it."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.backlog = []
+
+    def emit(self, record):
+        if audio_out is not None and audio_out.playing:
+            if len(self.backlog) < 20:
+                self.backlog.append(record)
+            return
+        with DisplayPaused():
+            while self.backlog:
+                super().emit(self.backlog.pop(0))
+            super().emit(record)
+
+
 # ------------- Logging ------------- #
 # Every message goes to the SD card; TERMINAL_LOGS (on by default) also prints it to the serial console.
 logger = getLogger("PrayerPortal")
 console_logs = env_flag("TERMINAL_LOGS")
 try:
-    logger.addHandler(RotatingFileHandler(LOG_FILE, maxBytes=LOG_MAX_BYTES, backupCount=1))
+    logger.addHandler(SDLogHandler(LOG_FILE, maxBytes=LOG_MAX_BYTES, backupCount=1))
 except OSError:
     console_logs = True  # no log file: keep the console so nothing is lost
 if console_logs:
@@ -157,6 +195,7 @@ def fatal(err, reset=True):
     except Exception:
         pass
     try:  # show the terminal again so the error can be read on the PyPortal
+        board.DISPLAY.auto_refresh = True
         board.DISPLAY.root_group = displayio.CIRCUITPYTHON_TERMINAL
     except Exception:
         pass
@@ -361,9 +400,10 @@ def play_adhan(audio, speaker_enable, filename):
     wavfile = None
     try:
         clean_memory()
-        wavfile = open(ADHAN_DIR + "/" + filename, "rb")
-        speaker_enable.value = True
-        audio.play(audiocore.WaveFile(wavfile))
+        with DisplayPaused():
+            wavfile = open(ADHAN_DIR + "/" + filename, "rb")
+            speaker_enable.value = True
+            audio.play(audiocore.WaveFile(wavfile))
         return wavfile
     except Exception as e:
         logger.error(f"Cannot play {filename}: {e} ")
@@ -376,7 +416,7 @@ def play_adhan(audio, speaker_enable, filename):
 # ------------- Run ------------- #
 
 def main():
-    global esp, utc_offset, offset_fixed, footer_hold_until, status_label
+    global esp, utc_offset, offset_fixed, footer_hold_until, status_label, audio_out
     log_memory("Boot")
 
     if SECRETS["ssid"] is None or SECRETS["password"] is None:
@@ -421,6 +461,7 @@ def main():
         audio = audioio.AudioOut(board.AUDIO_OUT)
     else:
         audio = audioio.AudioOut(board.SPEAKER)
+    audio_out = audio  # the log handler checks it
     touch = adafruit_touchscreen.Touchscreen(
         board.TOUCH_XL, board.TOUCH_XR, board.TOUCH_YD, board.TOUCH_YU,
         calibration=((5200, 59000), (5800, 57000)),
@@ -462,7 +503,6 @@ def main():
     splash.append(status_label)
 
     show_day(tiles, gregorian_label, hijri_label, times, gregorian, hijri)
-    board.DISPLAY.root_group = splash  # replaces the terminal shown since boot
     clean_memory()
 
     night_level = None  # optional: NIGHT_BRIGHTNESS (percent) dims the screen at night
@@ -484,6 +524,8 @@ def main():
     next_fetch = 0  # earliest time for the next prayer-times request
     last_epoch = -1
     last_touch = 0.0
+    ui_shown = False  # the terminal stays on screen until the first pass has filled every label
+    save_pending = False  # adhan choice waiting to be saved once no adhan is playing
 
     while True:
         # Touch: tap a prayer tile to select it, tap the footer to change its adhan.
@@ -500,7 +542,7 @@ def main():
                 if now >= shown_until:
                     shown = next_idx
                 adhan_files[shown] = pl.cycle(available, adhan_files[shown])
-                save_adhans(adhan_files)
+                save_pending = True
                 shown_until = now + HOLD_S
                 footer_hold_until = 0
                 status_label.text = adhan_footer(adhan_files, shown, next_idx)
@@ -521,7 +563,8 @@ def main():
                 elif epoch >= next_fetch and playing is None:
                     networked = True
                     try:
-                        times, gregorian, hijri = fetch_day(ymd, city, country, state, method, quick=True)
+                        with DisplayPaused():
+                            times, gregorian, hijri = fetch_day(ymd, city, country, state, method, quick=True)
                         times_ymd = ymd
                         show_day(tiles, gregorian_label, hijri_label, times, gregorian, hijri)
                     except Exception as e:
@@ -535,7 +578,8 @@ def main():
                 networked = True
                 try:
                     tomorrow_ymd = local_ymd(epoch + pl.DAY_S)
-                    tomorrow = fetch_day(tomorrow_ymd, city, country, state, method, quick=True)
+                    with DisplayPaused():
+                        tomorrow = fetch_day(tomorrow_ymd, city, country, state, method, quick=True)
                     show_times(tiles, tomorrow[0], "Tomorrow's prayer times")  # shown now, the date changes at midnight
                 except Exception as e:
                     logger.error(f"Tomorrow's prayer times unavailable: {e} ")
@@ -546,7 +590,8 @@ def main():
             if epoch >= next_sync and playing is None:
                 networked = True
                 try:
-                    refresh_clock()
+                    with DisplayPaused():
+                        refresh_clock()
                     next_sync = time.time() + SYNC_EVERY_S
                 except Exception as e:
                     logger.error(f"Clock sync failed, keeping the RTC time: {e} ")
@@ -565,6 +610,11 @@ def main():
                 playing = None
                 speaker_enable.value = False
                 logger.info("Adhan has finished. ")
+
+            if save_pending and playing is None:
+                with DisplayPaused():
+                    save_adhans(adhan_files)
+                save_pending = False
 
             # Next prayer, its adhan and the countdown to it.
             next_idx, prayer_s = pl.next_prayer(now_s, times, tomorrow[0] if tomorrow else None)
@@ -598,6 +648,10 @@ def main():
                     except Exception as e:
                         logger.warning(f"Cannot change the brightness: {e} ")
                         night_level = None
+
+            if not ui_shown:  # first pass done: draw everything at once, after the startup network work
+                board.DISPLAY.root_group = splash
+                ui_shown = True
 
             if now_s % 60 == 0:
                 clean_memory()
