@@ -1,77 +1,240 @@
+"""PrayerPortal: prayer times, clock and adhan on the Adafruit PyPortal Titano."""
 import time
 from gc import collect as clean_memory, mem_free
-from os import getenv
+from json import dump, load
+from os import getenv, listdir
 
-import displayio
-import rtc
-import board
-from storage import remount
-from digitalio import DigitalInOut
-from adafruit_bitmap_font import bitmap_font
-from adafruit_display_text.label import Label
-from micropython import const
-from adafruit_pyportal.graphics import Graphics
-from adafruit_esp32spi.adafruit_esp32spi import ESP_SPIcontrol
-from adafruit_connection_manager import get_radio_socketpool, get_radio_ssl_context
-from adafruit_datetime import date as adafruit_date, datetime as adafruit_datetime, time as adafruit_time
-from adafruit_logging import FileHandler, INFO, StreamHandler, getLogger
-from adafruit_requests import Session
+import adafruit_touchscreen
 import audiocore
 import audioio
-# import adafruit_touchscreen
+import board
+import displayio
+import microcontroller
+import rtc
+from adafruit_bitmap_font import bitmap_font
+from adafruit_connection_manager import get_radio_socketpool, get_radio_ssl_context
+from adafruit_display_text.label import Label
+from adafruit_esp32spi.adafruit_esp32spi import ESP_SPIcontrol
+from adafruit_logging import INFO, RotatingFileHandler, StreamHandler, getLogger
+from adafruit_requests import Session
+from digitalio import DigitalInOut
+from micropython import const
+
+import prayer_logic as pl
 
 clean_memory()
-print("\n*******************************")
-print(f"** Free memory: {mem_free()} **")
-print("*******************************\n")
 
-esp = ESP_SPIcontrol(
-        board.SPI(),
-        DigitalInOut(board.ESP_CS),
-        DigitalInOut(board.ESP_BUSY),
-        DigitalInOut(board.ESP_RESET)
+# ------------- Constants ------------- #
+SCREEN_WIDTH = const(480)
+SCREEN_HEIGHT = const(320)
+WHITE = const(0xFFFFFF)
+
+RETRIES_DELAY = const(10)  # seconds, multiplied by the attempt number
+MAX_RETRIES = const(3)
+RETRY_AFTER_S = const(300)  # wait before retrying a failed refresh
+SYNC_EVERY_S = const(3600)  # NTP / UTC offset refresh period
+RESET_AFTER_S = const(30)  # delay before rebooting after a fatal error
+HOLD_S = const(10)  # how long a footer message / selected prayer stays shown
+HIGHLIGHT = const(0xFFC832)  # outline colour for a touched prayer / the footer
+FLASH_S = 0.35  # how long the footer outline stays after a tap
+MIN_VALID_UNIX = 1700000000  # the ESP32 reports ~0 until its NTP sync completes
+
+ADHAN_LEAD_S = const(300)  # the adhan plays 5 minutes before the prayer
+ADHAN_DIR = "/sd/adhans"
+ADHAN_CONFIG = "/sd/adhans.json"
+DEFAULT_ADHANS = (
+    "AhmadAlNafees.wav",  # Fajr
+    "HafizMustafaOzcan.wav",  # Dhuhr
+    "MasjidAlHaramMecca.wav",  # Asr
+    "MisharyRashidAlafasy.wav",  # Maghrib
+    "QariAbdulKareem.wav",  # Isha
 )
 
-graphics = Graphics(
-        # default_bg="/sd/images/loading.bmp", # FIXME
-        debug=True,
-)
+LOG_FILE = "/sd/PrayerPortal.log"
+LOG_MAX_BYTES = const(65536)  # one backup is kept, so at most ~128 KB on the SD card
 
-try:
-    remount(mount_path="/", readonly=False)
-    mounted = True
-except RuntimeError:
-    mounted = False
+LOCATION_URL = "http://ip-api.com/json/?fields=status,message,country,city,timezone,offset"
+ALADHAN_URL = "https://api.aladhan.com/v1/timingsByCity/"
 
-# Set up logging
-logger = getLogger("PrayerPortal")
-try:
-    log_file = "/PrayerPortal.log"  # Log file path
-    handler = FileHandler(log_file)
-except OSError:
-    handler = StreamHandler()
-logger.setLevel(INFO)
-logger.addHandler(handler)
-
-if mounted:
-    logger.info("Root filesystem mounted ")
-else:
-    logger.warning("Failed to mount the root filesystem ")
-
-# Wi-Fi configuration
 SECRETS = {
     "ssid": getenv("CIRCUITPY_WIFI_SSID"),
     "password": getenv("CIRCUITPY_WIFI_PASSWORD"),
 }
-if SECRETS["ssid"] is None or SECRETS["password"] is None:
-    # TODO Show error on screen
-    raise ValueError("Wi-Fi secrets are missing. Please add them in settings.py!")
 
-RETRIES_DELAY = const(10)
-MAX_RETRIES = const(3)
+
+
+def env_flag(name, default=True):
+    """Read an on/off setting from settings.toml (0, false, off and no mean off)."""
+    value = getenv(name)
+    if value is None:
+        return default
+    return str(value).strip().lower() not in ("0", "false", "off", "no")
+
+
+# ------------- Sharing the SD card ------------- #
+# The screen images, the adhan WAV files and the log file all live on the SD card, and the card shares its
+# SPI bus with the ESP32. The screen refresh and the audio buffers read the card in the background: if one of
+# them runs while the main code holds the bus (an SD write, a Wi-Fi request), the board hangs or resets.
+# So the screen refresh is paused around those operations, and nothing touches the card while an adhan plays.
+audio_out = None  # set once the speaker is ready
+
+
+class DisplayPaused:
+    """`with DisplayPaused():` stops the background screen refresh for the length of the block."""
+
+    def __enter__(self):
+        self.previous = board.DISPLAY.auto_refresh
+        board.DISPLAY.auto_refresh = False
+
+    def __exit__(self, *exc):
+        board.DISPLAY.auto_refresh = self.previous
+        return False
+
+
+class SDLogHandler(RotatingFileHandler):
+    """Rotating log file on the SD card. While an adhan plays, lines wait in memory and are written after it."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.backlog = []
+
+    def emit(self, record):
+        if audio_out is not None and audio_out.playing:
+            if len(self.backlog) < 20:
+                self.backlog.append(record)
+            return
+        with DisplayPaused():
+            while self.backlog:
+                super().emit(self.backlog.pop(0))
+            super().emit(record)
+
+
+# ------------- Logging ------------- #
+# Every message goes to the SD card; TERMINAL_LOGS (on by default) also prints it to the serial console.
+logger = getLogger("PrayerPortal")
+console_logs = env_flag("TERMINAL_LOGS")
+try:
+    logger.addHandler(SDLogHandler(LOG_FILE, maxBytes=LOG_MAX_BYTES, backupCount=1))
+except OSError:
+    console_logs = True  # no log file: keep the console so nothing is lost
+if console_logs:
+    logger.addHandler(StreamHandler())
+logger.setLevel(INFO)
+
+# ------------- State shared with the helpers ------------- #
+esp = None
+utc_offset = 0
+offset_fixed = False  # True when UTC_OFFSET is set in settings.toml
+status_label = None  # footer label: adhan name, or a status / error message
+footer_hold_until = 0  # while time.time() is below this, keep the message shown
+
+
+# ------------- Display helpers ------------- #
+
+def set_image(group, filename):
+    """Set the image file for a given group for display.
+    This is most useful for Icons or image slideshows.
+        :param group: The chosen group
+        :param filename: The filename of the chosen image
+        :return: the open image file (it must stay open while the image is shown)
+    """
+    if group:
+        group.pop()
+
+    if not filename:
+        return None  # we're done, no icon desired
+
+    logger.info(f"Set image {filename} ")
+    image_file = open(filename, "rb")
+    image = displayio.OnDiskBitmap(image_file)
+    image.pixel_shader.make_transparent(0)
+    group.append(displayio.TileGrid(image, pixel_shader=image.pixel_shader))
+    return image_file
+
+
+def make_frame(x, y, width, height, thickness):
+    """A hollow rectangle made of four thin strips (hidden at first).
+
+    Strips, not one big bitmap: the background is read from the SD card each time a screen area
+    is redrawn, so a thin outline is redrawn much faster than a filled rectangle.
+    """
+    palette = displayio.Palette(2)
+    palette[0] = HIGHLIGHT
+    horizontal = displayio.Bitmap(width, thickness, 2)
+    vertical = displayio.Bitmap(thickness, height - 2 * thickness, 2)
+    frame = displayio.Group(x=x, y=y)
+    frame.append(displayio.TileGrid(horizontal, pixel_shader=palette))
+    frame.append(displayio.TileGrid(horizontal, pixel_shader=palette, y=height - thickness))
+    frame.append(displayio.TileGrid(vertical, pixel_shader=palette, y=thickness))
+    frame.append(displayio.TileGrid(vertical, pixel_shader=palette, x=width - thickness, y=thickness))
+    frame.hidden = True
+    return frame
+
+
+def set_text(label, text, x0, width):
+    """Change a label only when its text changed, centered in [x0, x0 + width)."""
+    if label.text != text:
+        label.text = text
+        label.x = x0 + (width - label.bounding_box[2]) // 2
+
+
+def show_status(text, hold=0):
+    """Show a short message in the footer; with hold, keep it for that many seconds.
+
+    Until the interface is up the screen shows the terminal, so the message goes to the log instead.
+    """
+    global footer_hold_until
+    if status_label is None:
+        logger.info(text)
+        return
+    status_label.text = text[:38]  # stay clear of the footer icons
+    footer_hold_until = time.time() + hold if hold else 0
+
+
+def show_times(tiles, times, tag="Prayer times"):
+    for i in range(5):
+        set_text(tiles[i], pl.fmt_hm(times[i]), i * 96, 96)
+    logger.info(f"{tag}: " + ", ".join(f"{pl.PRAYERS[i]} {pl.fmt_hm(times[i])}" for i in range(5)))
+
+
+def show_day(tiles, gregorian_label, hijri_label, times, gregorian, hijri):
+    show_times(tiles, times)
+    set_text(gregorian_label, gregorian, 0, 240)
+    set_text(hijri_label, hijri, 0, 240)
+
+
+def log_memory(tag):
+    clean_memory()
+    logger.info(f"{tag} - free memory: {mem_free()} B")
+
+
+def fatal(err, reset=True):
+    """Report an unrecoverable error on screen and in the log, then reboot."""
+    message = f"{type(err).__name__}: {err}"
+    try:
+        logger.error(message)
+    except Exception:
+        pass
+    try:  # show the terminal again so the error can be read on the PyPortal
+        board.DISPLAY.auto_refresh = True
+        board.DISPLAY.root_group = displayio.CIRCUITPYTHON_TERMINAL
+    except Exception:
+        pass
+    try:  # the traceback always goes to the console, whatever TERMINAL_LOGS says
+        import traceback
+        traceback.print_exception(err)
+    except Exception:
+        print(message)
+    if not reset:  # e.g. missing settings: editing settings.toml reloads the code
+        while True:
+            time.sleep(1)
+    time.sleep(RESET_AFTER_S)
+    microcontroller.reset()
+
+
+# ------------- Network ------------- #
 
 def connect_to_wifi():
-    global esp
     if not esp.connected:
         logger.info(f"Connecting to Wi-Fi {SECRETS['ssid']} ... ")
         try:
@@ -85,19 +248,7 @@ def connect_to_wifi():
                 raise
         logger.info(f"Connected to {esp.ap_info.ssid} with RSSI: {esp.ap_info.rssi} ")
         clean_memory()
-        # logger.info(f"My IP address is {esp.ipv4_address} ")
 
-def disconnect_from_wifi():
-    global esp
-    if esp.connected:
-        logger.info(f"Disconnecting from Wi-Fi {SECRETS['ssid']} ... ")
-        try:
-            esp.disconnect()
-            clean_memory()
-            logger.info("Disconnected from Wi-Fi successfully ")
-        except Exception as e:
-            logger.error(f"Failed to disconnect from Wi-Fi: {e} ")
-            raise
 
 def recover_esp():
     """Reset a hung ESP32 co-processor and reconnect Wi-Fi."""
@@ -110,534 +261,447 @@ def recover_esp():
     connect_to_wifi()
     clean_memory()
 
-def fetch_and_set_rtc(timezone="UTC", utc_offset_seconds=0):
-    # Prefer NTP over HTTPS time APIs: TLS often hangs the PyPortal ESP32 SPI stack.
-    retry_count = 0
-    while retry_count < MAX_RETRIES:
+
+def get_json(url, check=None, quick=False):
+    """GET url and return the decoded JSON, retrying after an ESP32 reset.
+
+    check(data) may raise to reject a response (it is then retried too).
+    quick: two attempts and no pause, so a network outage cannot freeze the clock for long.
+    """
+    attempts = 2 if quick else MAX_RETRIES
+    for attempt in range(1, attempts + 1):
+        response = None
         try:
             connect_to_wifi()
-            logger.info(
-                f"Syncing RTC via NTP for {timezone} (UTC offset {utc_offset_seconds}s) ..."
-            )
-            ntp_unix = esp.get_time()[0]
-            local_unix = ntp_unix + int(utc_offset_seconds)
-            t = time.localtime(local_unix)
-            parsed_time = adafruit_datetime(
-                year=t.tm_year,
-                month=t.tm_mon,
-                day=t.tm_mday,
-                hour=t.tm_hour,
-                minute=t.tm_min,
-                second=t.tm_sec,
-            )
-            rtc.RTC().datetime = t
-            logger.info(f"RTC has been set to {parsed_time} ({timezone}) ")
-            clean_memory()
-            return parsed_time
+            session = Session(get_radio_socketpool(esp), get_radio_ssl_context(esp))
+            response = session.get(url, stream=True)
+            if response.status_code != 200:
+                raise RuntimeError(f"HTTP {response.status_code}")
+            data = response.json()
+            if check is not None:
+                check(data)
+            return data
         except Exception as e:
-            retry_count += 1
-            if retry_count == MAX_RETRIES:
+            if attempt == attempts:
+                logger.error(f"Request failed: {e} ")
+                raise
+            logger.warning(f"Request failed ({e}), retrying ... ")
+        finally:
+            if response is not None:
+                response.close()
+        recover_esp()
+        if not quick:
+            time.sleep(RETRIES_DELAY * attempt)
+        clean_memory()
+
+
+def check_location(data):
+    if data.get("status") != "success":
+        raise RuntimeError(data.get("message", "ip-api lookup failed"))
+    if "offset" not in data:
+        raise RuntimeError("ip-api response missing UTC offset")
+
+
+def check_aladhan(data):
+    if data.get("code") != 200:
+        raise RuntimeError(f"Aladhan: {data.get('data', data.get('status'))}")
+
+
+def fetch_location(quick=False):
+    # `offset` is not in ip-api's default fields; it is requested explicitly.
+    return get_json(LOCATION_URL, check_location, quick)
+
+
+def fetch_day(ymd, city, country, state, method, quick=False):
+    """Prayer times for ymd = (year, month, day): ([5 seconds], gregorian, hijri)."""
+    url = (f"{ALADHAN_URL}{ymd[2]:02d}-{ymd[1]:02d}-{ymd[0]:04d}"
+           f"?country={pl.urlquote(country)}&city={pl.urlquote(city)}&method={pl.urlquote(str(method))}")
+    if state:
+        url += f"&state={pl.urlquote(state)}"
+    logger.info(f"Fetching prayer times for {city},{(' ' + state + ',') if state else ''} {country} "
+                f"on {ymd[0]}-{ymd[1]:02d}-{ymd[2]:02d} using method {method} ")
+    body = get_json(url, check_aladhan, quick)
+    day = pl.parse_day(body["data"], ymd)  # keep 5 numbers and 2 strings, drop the rest
+    del body
+    log_memory(f"Prayer times for {ymd[0]}-{ymd[1]:02d}-{ymd[2]:02d} fetched")
+    return day
+
+
+def sync_rtc(offset_seconds, quick=False):
+    """Set the RTC to local time from the ESP32's NTP clock (retries, then raises)."""
+    # Prefer NTP over HTTPS time APIs: TLS often hangs the PyPortal ESP32 SPI stack.
+    attempts = 2 if quick else MAX_RETRIES
+    for attempt in range(1, attempts + 1):
+        try:
+            connect_to_wifi()
+            ntp_unix = esp.get_time()[0]
+            if ntp_unix < MIN_VALID_UNIX:
+                raise RuntimeError("NTP time not ready")
+            rtc.RTC().datetime = time.localtime(ntp_unix + offset_seconds)
+            t = time.localtime()
+            logger.info(f"RTC set to {t.tm_hour:02d}:{t.tm_min:02d}:{t.tm_sec:02d} (UTC offset {offset_seconds}s) ")
+            clean_memory()
+            return
+        except Exception as e:
+            if attempt == attempts:
                 logger.error(f"Failed to fetch and set RTC: {e} ")
                 raise
             logger.warning("Failed to fetch and set RTC, retrying ... ")
             recover_esp()
-            time.sleep(RETRIES_DELAY * retry_count)
+            if not quick:
+                time.sleep(RETRIES_DELAY * attempt)
             clean_memory()
 
-def fetch_location():
-    requests = Session(socket_pool=get_radio_socketpool(esp), ssl_context=get_radio_ssl_context(esp))
-    # `offset` is not in ip-api's default fields; request it explicitly.
-    api_url = "http://ip-api.com/json/?fields=status,message,country,city,timezone,offset"
-    logger.info(f"Fetching location from {api_url} ...")
-    response = None
-    retry_count = 0
-    while retry_count < MAX_RETRIES:
+
+def refresh_clock():
+    """Re-sync the RTC; also re-read the UTC offset (daylight saving) unless UTC_OFFSET is set."""
+    global utc_offset
+    if not offset_fixed:
         try:
-            response = requests.get(url=api_url, stream=True)
-            respond_json = response.json()
-            response.close()
-            del response
-            del requests
-            if respond_json.get("status") == "fail":
-                raise RuntimeError(respond_json.get("message", "ip-api lookup failed"))
-            timezone = respond_json.get("timezone", "UTC")
-            if "offset" not in respond_json:
-                raise RuntimeError("ip-api response missing UTC offset")
-            utc_offset = int(respond_json["offset"])
-            logger.info(
-                f"Location fetched: {respond_json['city']}, {respond_json['country']} "
-                f"({timezone}, offset {utc_offset}s)"
-            )
-
-            clean_memory()
-            return respond_json["country"], respond_json["city"], timezone, utc_offset
+            utc_offset = int(fetch_location(quick=True)["offset"])
         except Exception as e:
-            retry_count += 1
-            if retry_count == MAX_RETRIES:
-                logger.error(f"Failed to fetch location: {e} ")
-                raise
-            logger.warning("Failed to fetch location, retrying ... ")
-            if response:
-                response.close()
-                del response
-            del requests
-            recover_esp()
-            time.sleep(RETRIES_DELAY * retry_count)
-            requests = Session(socket_pool=get_radio_socketpool(esp), ssl_context=get_radio_ssl_context(esp))
-            clean_memory()
+            logger.warning(f"UTC offset refresh failed, keeping {utc_offset}s: {e} ")
+    sync_rtc(utc_offset, quick=True)
 
 
-def construct_prayer_times_url(date, city, country, state):
-    adhans_api_base_url = "https://api.aladhan.com/v1/"
-    methode = getenv("CALCULATION_METHOD", 2)
+# ------------- Time helpers ------------- #
 
-    url = f"{adhans_api_base_url}timingsByCity/{date.day}-{date.month}-{date.year}?country={country}&city={city}&method={methode}"
-    if state:
-        url += f"&state={state}"
-
-    logger.info(
-            f"Fetching prayer times for {city},{(' ' + state + ',') if state else ''} {country} for {date} using method {methode} "
-    )
-    logger.info(f"URL: {url}")
-    clean_memory()
-    return url
-
-def try_fetch_prayer_times(url):
-    requests = Session(socket_pool=get_radio_socketpool(esp), ssl_context=get_radio_ssl_context(esp))
-    retry_count = 0
-    response = None
-    while retry_count < MAX_RETRIES:
-        try:
-            logger.info(f"Attempting to fetch prayer times ...")
-            clean_memory()
-            response = requests.get(url=url, stream=True)
-            response_json = response.json()
-            response.close()
-            del response
-            del requests
-
-            logger.info("Prayer times fetched successfully!")
-            clean_memory()
-            return response_json
-        except Exception as e:
-            retry_count += 1
-
-            if retry_count == MAX_RETRIES:
-                logger.error(f"Failed to fetch prayer times: {e}")
-                raise
-            else:
-                logger.warning("Failed to fetch prayer times, retrying...")
-                if response:
-                    response.close()
-                    del response
-                del requests
-                recover_esp()
-                time.sleep(RETRIES_DELAY*retry_count)
-                requests = Session(socket_pool=get_radio_socketpool(esp), ssl_context=get_radio_ssl_context(esp))
-                clean_memory()
-
-def fetch_prayer_times(date: adafruit_date = None,
-                       city: str = getenv("CITY", "Montreal"),
-                       country: str = getenv("COUNTRY", "Canada"),
-                       state: str = getenv("STATE", ""),
-                       ):
-    if date is None:
-        date = adafruit_datetime.now().date()
-    url = construct_prayer_times_url(date=date, city=city, country=country, state=state)
-    data = try_fetch_prayer_times(url)
-    return data
-
-clean_memory()
-
-connect_to_wifi()
-current_ip_country, current_ip_city, current_timezone, current_utc_offset = fetch_location()
-current_timezone = getenv("TIMEZONE", current_timezone)
-offset_env = getenv("UTC_OFFSET")
-if offset_env is not None:
-    current_utc_offset = int(offset_env)
-fetch_and_set_rtc(current_timezone, current_utc_offset)
-prayers_date = today_date = adafruit_datetime.now().date()
-today_data = fetch_prayer_times(date=prayers_date, country=current_ip_country, city=current_ip_city)
-
-speaker_enable = DigitalInOut(board.SPEAKER_ENABLE)
-speaker_enable.switch_to_output(False)
-if hasattr(board, "AUDIO_OUT"):
-    audio = audioio.AudioOut(board.AUDIO_OUT)
-# elif hasattr(board, "SPEAKER"):
-else:
-    audio = audioio.AudioOut(board.SPEAKER)
-
-clean_memory()
-print("\n************************")
-print(f"** Free memory: {mem_free()} **")
-print("************************\n")
-
-# ------------- Constantes ------------- #
-SCREEN_WIDTH = const(480)
-SCREEN_HEIGHT = const(320)
-WHITE = const(0xFFFFFF)
-BLACK = const(0x000000)
-
-# Fonts
-FONT_16 = bitmap_font.load_font("/sd/fonts/Helvetica-Bold-16.bdf")
-FONT_16.load_glyphs(b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 :")
-
-FONT_24 = bitmap_font.load_font("/sd/fonts/Helvetica-Bold-24-AlphaNum.bdf")
-FONT_24.load_glyphs(b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 :")
-
-FONT_48 = bitmap_font.load_font("/sd/fonts/Helvetica-Bold-48-CurrentTime.bdf")
-FONT_48.load_glyphs(b"0123456789:")
-
-# Adhans
-ADHAN_MINUTES_BEFORE_PRAYER = const(5)
-ADHANS = {
-    "Fajr": {
-        "file": "/sd/adhans/AhmadAlNafees.wav",
-        "name": "Ahmad Al Nafees"
-    },
-    "Dhuhr": {
-        "file": "/sd/adhans/HafizMustafaOzcan.wav",
-        "name": "Hafiz Mustafa Ozcan"
-    },
-    "Asr": {
-        "file": "/sd/adhans/MasjidAlHaramMecca.wav",
-        "name": "Masjid Al Haram Mecca"
-    },
-    "Maghrib": {
-        "file": "/sd/adhans/MisharyRashidAlafasy.wav",
-        "name": "Mishary Rashid Alafasy"
-    },
-    "Isha": {
-        "file": "/sd/adhans/QariAbdulKareem.wav",
-        "name": "Qari Abdul Kareem"
-    }
-}
-
-# ------------- Functions ------------- #
-
-def set_image(group, filename):
-    """Set the image file for a given goup for display.
-    This is most useful for Icons or image slideshows.
-        :param group: The chosen group
-        :param filename: The filename of the chosen image
-    """
-    print("Set image ", filename)
-    if group:
-        group.pop()
-
-    if not filename:
-        return  # we're done, no icon desired
-
-    image_file = open(filename, "rb")
-    image = displayio.OnDiskBitmap(image_file)
-    image.pixel_shader.make_transparent(0)
-    image_sprite = displayio.TileGrid(image, pixel_shader=image.pixel_shader)
-
-    group.append(image_sprite)
-
-def get_str_time(the_time):
-    return f"{the_time.hour:02}:{the_time.minute:02}"
+def local_clock(epoch):
+    """(seconds since local midnight, (year, month, day)) for an RTC epoch."""
+    t = time.localtime(epoch)
+    return t.tm_hour * 3600 + t.tm_min * 60 + t.tm_sec, (t.tm_year, t.tm_mon, t.tm_mday)
 
 
-def get_hijri_str_month(month_number):
-    months = {
-        1: "Muharram",
-        2: "Safar",
-        3: "Rabi' al-awwal",
-        4: "Rabi' al-thani",
-        5: "Jumada al-awwal",
-        6: "Jumada al-thani",
-        7: "Rajab",
-        8: "Sha'ban",
-        9: "Ramadan",
-        10: "Shawwal",
-        11: "Dhu al-Qi'dah",
-        12: "Dhu al-Hijjah"
-    }
-    return months[month_number]
+def local_ymd(epoch):
+    return local_clock(epoch)[1]
 
-def get_str_date(data):
-    today_gregorian_dict = data['data']['date']['gregorian']
-    today_gregorian = today_gregorian_dict['day'] + ' ' + today_gregorian_dict['month']['en'] + ' ' + \
-                      today_gregorian_dict['year']
-    today_hijiri_dict = data['data']['date']['hijri']
-    today_hijiri = today_hijiri_dict['day'] + ' ' + get_hijri_str_month(today_hijiri_dict['month']['number']) + ' ' + \
-                   today_hijiri_dict['year']
-    return today_gregorian, today_hijiri
 
-def get_day_timings(data, date):
-    if data is not None:
-        day_date = data['date']['gregorian']
-        api_date = adafruit_date(
-                year=int(day_date['year']),
-                month=int(day_date['month']['number']),
-                day=int(day_date['day'])
-        )
-        if api_date == date:
-            return data['timings']
-    return None
+# ------------- Adhans ------------- #
 
-def get_next_prayer(timings, current_t: adafruit_time = None):
-    if timings is not None:
-        if current_t is None:
-            current_t = adafruit_datetime.now().time()
+def list_adhans():
+    try:
+        names = [n for n in listdir(ADHAN_DIR) if n.lower().endswith(".wav") and not n.startswith(".")]
+    except OSError:
+        names = []
+    names.sort()
+    return names
 
-        for next_p in ["Fajr", "Dhuhr", "Asr", "Maghrib", "Isha"]:
-            t = timings[next_p].split(' ')[0].split(':')
-            next_p_time = adafruit_time(hour=int(t[0]), minute=int(t[1]))
 
-            if next_p_time > current_t:
-                return next_p, next_p_time
+def load_adhans(available):
+    """Adhan file per prayer: the saved choice if it still exists, else the default."""
+    files = list(DEFAULT_ADHANS)
+    try:
+        with open(ADHAN_CONFIG) as fp:
+            saved = load(fp)
+        for i in range(5):
+            name = saved.get(pl.PRAYERS[i])
+            if name in available:
+                files[i] = name
+    except Exception:  # no / invalid file: keep the defaults
+        pass
+    return files
 
-    return None, None
 
-def get_next_day(date_obj: adafruit_date):
-    """
-    Returns the next day, taking into account month and year changes.
-    """
-    if date_obj.month == 2:  # Handle February and leap years
-        if (date_obj.year % 4 == 0 and date_obj.year % 100 != 0) or (date_obj.year % 400 == 0):
-            days_in_month = 29
-        else:
-            days_in_month = 28
-    elif date_obj.month in [4, 6, 9, 11]:  # Handle months with 30 days
-        days_in_month = 30
-    else:  # Handle months with 31 days
-        days_in_month = 31
+def save_adhans(files):
+    try:
+        with open(ADHAN_CONFIG, "w") as fp:
+            dump({pl.PRAYERS[i]: files[i] for i in range(5)}, fp)
+    except OSError as e:
+        logger.error(f"Cannot save the adhan choice: {e} ")
 
-    # Check if it's the last day of the month
-    if date_obj.day < days_in_month:
-        return adafruit_date(year=date_obj.year, month=date_obj.month, day=date_obj.day + 1)
-    else:
-        if date_obj.month == 12:  # December, transition to next year
-            return adafruit_date(year=date_obj.year + 1, month=1, day=1)
-        else:
-            return adafruit_date(year=date_obj.year, month=date_obj.month + 1, day=1)
 
-# ------------- Inits ------------- #
+def adhan_footer(files, shown, next_idx):
+    name = pl.adhan_label(files[shown])
+    return (name if shown == next_idx else f"{pl.PRAYERS[shown]}: {name}")[:38]  # clear of the icons
 
-clean_memory()
-print("\n************************")
-print(f"** Free memory: {mem_free()} **")
-print("************************\n")
 
-display = board.DISPLAY
-display.rotation = 0
+def play_adhan(audio, speaker_enable, filename):
+    """Start playing an adhan without blocking; returns the open file, or None on failure."""
+    logger.info(f"Playing adhan {filename} ... ")
+    wavfile = None
+    try:
+        clean_memory()
+        with DisplayPaused():
+            wavfile = open(ADHAN_DIR + "/" + filename, "rb")
+            speaker_enable.value = True
+            audio.play(audiocore.WaveFile(wavfile))
+        return wavfile
+    except Exception as e:
+        logger.error(f"Cannot play {filename}: {e} ")
+        speaker_enable.value = False
+        if wavfile is not None:
+            wavfile.close()
+        return None
 
-# Initializes the display touch screen area
-# ts = adafruit_touchscreen.Touchscreen(board.TOUCH_XL, board.TOUCH_XR,
-#                                       board.TOUCH_YD, board.TOUCH_YU,
-#                                       calibration=((5200, 59000), (5800, 57000)),
-#                                       size=(SCREEN_WIDTH, SCREEN_HEIGHT))
-
-splash = displayio.Group(scale=1, x=0, y=0)
-
-clean_memory()
-
-# Set general back ground
-bg_group = displayio.Group(scale=1, x=0, y=0)
-set_image(bg_group, "/sd/images/bg1.bmp")
-splash.append(bg_group)
-
-# Set template
-template_group = displayio.Group(scale=1, x=0, y=0)
-set_image(template_group, "/sd/images/template.bmp")
-splash.append(template_group)
-
-clean_memory()
-
-# Initialize the prayer time labels
-prayer_time_labels = {}
-for i, prayer in enumerate(["Fajr", "Dhuhr", "Asr", "Maghrib", "Isha"]):
-    # Create the time label
-    pt_label = Label(y=71, font=FONT_16, color=WHITE)
-    splash.append(pt_label)
-    prayer_time_labels[prayer] = pt_label  # Store the time label for later updates
-
-clean_memory()
-
-# Initialize current time label
-ct_label = Label(y=151, font=FONT_48, text=get_str_time(adafruit_datetime.now().time()), color=WHITE)
-ct_label.x = (240 - ct_label.bounding_box[2]) // 2
-splash.append(ct_label)
-
-clean_memory()
-
-# Initialize current date labels
-today_str_gregorian, today_str_hijiri = get_str_date(today_data)
-cd_gregorian_label = Label(y=242, font=FONT_16, text=today_str_gregorian, color=WHITE)
-cd_hijri_label = Label(y=274, font=FONT_16, text=today_str_hijiri, color=WHITE)
-cd_gregorian_label.x = (240 - cd_gregorian_label.bounding_box[2]) // 2
-cd_hijri_label.x = (240 - cd_hijri_label.bounding_box[2]) // 2
-splash.append(cd_gregorian_label)
-splash.append(cd_hijri_label)
-
-clean_memory()
-
-# Initialize next prayer labels
-np_name_label = Label(y=127, font=FONT_24, color=WHITE)
-np_adhan_label = Label(y=198, font=FONT_24, color=WHITE)
-np_countdown_label = Label(y=269, font=FONT_24, color=WHITE)
-splash.append(np_name_label)
-splash.append(np_adhan_label)
-splash.append(np_countdown_label)
-
-clean_memory()
-
-# Initialize footer adhan label
-footer_adhan_label = Label(y=307, font=FONT_16, color=WHITE)
-splash.append(footer_adhan_label)
-
-clean_memory()
-
-print("\n************************")
-print(f"** Free memory: {mem_free()} **")
-print("************************\n")
 
 # ------------- Run ------------- #
 
-today_timings = None
-next_prayer = None
-next_prayer_time = None
-next_adhan_time = None
-start = True
-all_prayers_passed = False
-localtile_refresh = time.monotonic()
-time_sec_until_next_prayer = ADHAN_MINUTES_BEFORE_PRAYER * 60 + 10
+def main():
+    global esp, utc_offset, offset_fixed, footer_hold_until, status_label, audio_out
+    log_memory("Boot")
 
-# Set the splash screen as the root group for display
-board.DISPLAY.root_group = splash
+    if SECRETS["ssid"] is None or SECRETS["password"] is None:
+        fatal(ValueError("Wi-Fi secrets missing in settings.toml"), reset=False)
 
-clean_memory()
-while True:
-    # only query the online time once per hour (and on first run)
-    if (time.monotonic() - localtile_refresh) > 3600:
-        fetch_and_set_rtc(current_timezone, current_utc_offset)
-        localtile_refresh = time.monotonic()
+    esp = ESP_SPIcontrol(
+        board.SPI(),
+        DigitalInOut(board.ESP_CS),
+        DigitalInOut(board.ESP_BUSY),
+        DigitalInOut(board.ESP_RESET),
+    )
 
-    # update time label
-    ct_label.text = get_str_time(adafruit_datetime.now().time())
-    ct_label.x = (240 - ct_label.bounding_box[2]) // 2
+    # --- Network bootstrap ---
+    show_status("Wi-Fi: connecting ...")
+    connect_to_wifi()
+    show_status("Finding location ...")
+    place = fetch_location()
+    offset_env = getenv("UTC_OFFSET")
+    offset_fixed = offset_env is not None
+    utc_offset = int(offset_env) if offset_fixed else int(place["offset"])
+    timezone = getenv("TIMEZONE", place["timezone"])
+    city = getenv("CITY", place["city"])
+    country = getenv("COUNTRY", place["country"])
+    state = getenv("STATE", "")
+    method = getenv("CALCULATION_METHOD", 2)
+    logger.info(f"Location: {city}, {country} ({timezone}, UTC offset {utc_offset}s) ")
+    del place
 
-    # update date label
-    if today_date != adafruit_datetime.now().date():
-        today_date = adafruit_datetime.now().date()
-        today_gregorian, today_hijiri = get_str_date(today_data)
-        cd_gregorian_label.text = today_gregorian
-        cd_gregorian_label.x = (240 - cd_gregorian_label.bounding_box[2]) // 2
-        cd_hijri_label.text = today_hijiri
-        cd_hijri_label.x = (240 - cd_hijri_label.bounding_box[2]) // 2
+    show_status("Setting the clock ...")
+    sync_rtc(utc_offset)
+    show_status("Fetching prayer times ...")
+    times_ymd = local_ymd(time.time())
+    times, gregorian, hijri = fetch_day(times_ymd, city, country, state, method)
+    tomorrow = None  # (times, gregorian, hijri) of the next day, fetched after Isha
+    tomorrow_ymd = None
+    log_memory("Network ready")
 
-    clean_memory()
-    if today_timings is None:
-        today_timings = get_day_timings(today_data['data'], prayers_date)
-        if today_timings is not None:
-            if start:
-                start = False
-                logger.info("Today's Prayer Times: ")
-            else:
-                logger.info("Tomorrow's Prayer Times: ")
-
-            for i, prayer in enumerate(["Fajr", "Dhuhr", "Asr", "Maghrib", "Isha"]):
-                logger.info(f"{prayer}: {today_timings[prayer]}{', ' if prayer != 'Isha' else ''} ")
-                prayer_time_labels[prayer].text = today_timings[prayer]  # Update the time label text
-                prayer_time_labels[prayer].x = (i * 96) + (
-                        96 - prayer_time_labels[prayer].bounding_box[2]) // 2  # Recenter the text
-
-    if all_prayers_passed or (next_prayer == 'Fajr'):
-        all_prayers_passed = False
-        ct = adafruit_time(hour=00, minute=00, second=00)
+    # --- Audio and touch ---
+    speaker_enable = DigitalInOut(board.SPEAKER_ENABLE)
+    speaker_enable.switch_to_output(False)
+    if hasattr(board, "AUDIO_OUT"):
+        audio = audioio.AudioOut(board.AUDIO_OUT)
     else:
-        ct = adafruit_datetime.now().time()
+        audio = audioio.AudioOut(board.SPEAKER)
+    audio_out = audio  # the log handler checks it
+    touch = adafruit_touchscreen.Touchscreen(
+        board.TOUCH_XL, board.TOUCH_XR, board.TOUCH_YD, board.TOUCH_YU,
+        calibration=((5200, 59000), (5800, 57000)),
+        size=(SCREEN_WIDTH, SCREEN_HEIGHT),
+    )
+    available = list_adhans()
+    adhan_files = load_adhans(available)
 
-    new_next_prayer, new_next_prayer_time = get_next_prayer(timings=today_timings, current_t=ct)
+    # --- Screen ---
+    font_16 = bitmap_font.load_font("/sd/fonts/Helvetica-Bold-16.bdf")
+    font_16.load_glyphs("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 :'-.,()/!")
+    font_24 = bitmap_font.load_font("/sd/fonts/Helvetica-Bold-24-AlphaNum.bdf")
+    font_24.load_glyphs("FajrDhuhrAsrMaghribIsha0123456789 :hm")
+    font_48 = bitmap_font.load_font("/sd/fonts/Helvetica-Bold-48-CurrentTime.bdf")
+    font_48.load_glyphs("0123456789:")
 
-    if ((next_adhan_time is not None)
-            and (ct >= next_adhan_time)
-            and (time_sec_until_next_prayer <= ADHAN_MINUTES_BEFORE_PRAYER * 60)):
-        logger.info(f"Playing adhan {ADHANS[next_prayer]['name']} for {next_prayer} ... ")
-        wavfile = open(file=ADHANS[next_prayer]['file'], mode="rb")
-        wavedata = audiocore.WaveFile(wavfile)
-        speaker_enable.value = True
-        audio.play(wavedata)
-        while audio.playing:
-            pass
-        wavfile.close()
-        speaker_enable.value = False
-        logger.info(f"Adhan for {next_prayer} has finished. ")
-        next_adhan_time = None
+    splash = displayio.Group()
+    bg_group = displayio.Group()
+    bg_file = set_image(bg_group, "/sd/images/bg1.bmp")
+    splash.append(bg_group)
+    template_group = displayio.Group()
+    template_file = set_image(template_group, "/sd/images/template.bmp")
+    splash.append(template_group)
 
-    if (next_prayer_time is None) or (new_next_prayer_time != next_prayer_time):
-        if next_prayer_time is not None:
-            logger.info(f"{next_prayer} ({next_prayer_time}) has passed. Updating the next prayer time ... ")
+    tiles = []  # one time label per prayer
+    for _ in range(5):
+        tile = Label(y=71, font=font_16, color=WHITE)
+        splash.append(tile)
+        tiles.append(tile)
+    ct_label = Label(y=151, font=font_48, color=WHITE)
+    gregorian_label = Label(y=242, font=font_16, color=WHITE)
+    hijri_label = Label(y=274, font=font_16, color=WHITE)
+    np_name_label = Label(y=127, font=font_24, color=WHITE)
+    np_adhan_label = Label(y=198, font=font_24, color=WHITE)
+    np_countdown_label = Label(y=269, font=font_24, color=WHITE)
+    for label in (ct_label, gregorian_label, hijri_label, np_name_label, np_adhan_label, np_countdown_label):
+        splash.append(label)
+    status_label = Label(x=28, y=307, font=font_16, color=WHITE)
+    splash.append(status_label)
+    select_frame = make_frame(3, 3, 90, 75, 3)  # around the selected prayer (moved with .x)
+    flash_frame = make_frame(3, 294, 374, 23, 2)  # around the footer, flashes when it is tapped
+    splash.append(select_frame)
+    splash.append(flash_frame)
 
-        next_prayer = new_next_prayer
-        next_prayer_time = new_next_prayer_time
+    show_day(tiles, gregorian_label, hijri_label, times, gregorian, hijri)
+    clean_memory()
 
-        if next_prayer_time is not None:
-            next_adhan_time = adafruit_time(
-                    hour=(next_prayer_time.hour if next_prayer_time.minute >= ADHAN_MINUTES_BEFORE_PRAYER
-                          else (next_prayer_time.hour - 1) % 24),
-                    minute=(next_prayer_time.minute - ADHAN_MINUTES_BEFORE_PRAYER) % 60
-            )
-            logger.info(f"RTC: {adafruit_datetime.now()} ")
-            logger.info(f"Next prayer is {next_prayer} at time {next_prayer_time} and adhan {next_adhan_time} ")
+    night_level = None  # optional: NIGHT_BRIGHTNESS (percent) dims the screen at night
+    if getenv("NIGHT_BRIGHTNESS") is not None:
+        try:
+            night_level = max(0.05, min(1.0, int(getenv("NIGHT_BRIGHTNESS")) / 100))
+        except ValueError:
+            logger.warning("NIGHT_BRIGHTNESS must be a whole percentage, ignoring it ")
+    dimmed = None
+    log_memory("Screen ready")
 
-            # update next prayer label
-            np_name_label.text = next_prayer
-            np_name_label.x = 240 + (240 - np_name_label.bounding_box[2]) // 2
+    # --- Loop ---
+    trigger = pl.AdhanTrigger(ADHAN_LEAD_S)
+    playing = None  # open WAV file while an adhan is playing
+    next_idx = 0  # index of the next prayer
+    shown = 0  # prayer whose adhan the footer shows
+    shown_until = 0
+    next_sync = time.time() + SYNC_EVERY_S
+    next_fetch = 0  # earliest time for the next prayer-times request
+    last_epoch = -1
+    last_touch = 0.0
+    flash_until = 0.0
+    ui_shown = False  # the terminal stays on screen until the first pass has filled every label
+    save_pending = False  # adhan choice waiting to be saved once no adhan is playing
 
-            # update next adhan label
-            np_adhan_label.text = get_str_time(next_adhan_time)
-            np_adhan_label.x = 240 + (240 - np_adhan_label.bounding_box[2]) // 2
+    while True:
+        # Touch: tap a prayer tile to select it, tap the footer to change its adhan.
+        point = touch.touch_point
+        if point is not None and time.monotonic() - last_touch > 0.6:
+            last_touch = time.monotonic()
+            now = time.time()
+            if point[1] < 80:  # the prayer row ends at y = 79
+                shown = min(point[0] // 96, 4)
+                shown_until = now + HOLD_S
+                footer_hold_until = 0
+                select_frame.x = shown * 96 + 3
+                select_frame.hidden = False
+                status_label.text = adhan_footer(adhan_files, shown, next_idx)
+            elif point[1] >= 293 and point[0] < 380 and available:
+                if now >= shown_until:
+                    shown = next_idx
+                adhan_files[shown] = pl.cycle(available, adhan_files[shown])
+                save_pending = True
+                shown_until = now + HOLD_S
+                footer_hold_until = 0
+                select_frame.x = shown * 96 + 3  # which prayer's adhan was changed
+                select_frame.hidden = False
+                flash_frame.hidden = False
+                flash_until = last_touch + FLASH_S
+                status_label.text = adhan_footer(adhan_files, shown, next_idx)
+                logger.info(f"{pl.PRAYERS[shown]} adhan set to {adhan_files[shown]} ")
 
-            footer_adhan_label.text = f"{ADHANS[next_prayer]['name']}"
-            footer_adhan_label.x = 28
+        if not flash_frame.hidden and time.monotonic() >= flash_until:
+            flash_frame.hidden = True
 
-        else:
-            if not all_prayers_passed:
-                logger.info(f"RTC: {adafruit_datetime.now()} ")
-                logger.info(f"All prayers for today {adafruit_datetime.now().date()} have passed. ")
-                all_prayers_passed = True
+        epoch = time.time()
+        if epoch != last_epoch:  # once per second
+            now_s, ymd = local_clock(epoch)
+            networked = False
 
-                prayers_date = get_next_day(prayers_date)
-                logger.info(f"Tomorrow is {prayers_date}. ")
+            # New day: use the times fetched yesterday evening, or fetch them.
+            if ymd != times_ymd:
+                if tomorrow is not None and tomorrow_ymd == ymd:
+                    times, gregorian, hijri = tomorrow
+                    times_ymd = ymd
+                    tomorrow = None
+                    show_day(tiles, gregorian_label, hijri_label, times, gregorian, hijri)
+                elif epoch >= next_fetch and playing is None:
+                    networked = True
+                    try:
+                        with DisplayPaused():
+                            times, gregorian, hijri = fetch_day(ymd, city, country, state, method, quick=True)
+                        times_ymd = ymd
+                        show_day(tiles, gregorian_label, hijri_label, times, gregorian, hijri)
+                    except Exception as e:
+                        logger.error(f"Prayer times for {ymd} unavailable: {e} ")
+                        show_status("Prayer times: retrying", HOLD_S)
+                        next_fetch = epoch + RETRY_AFTER_S
 
+            # After Isha: fetch tomorrow's times (Fajr is the next prayer).
+            if (tomorrow is None and ymd == times_ymd and now_s >= times[4]
+                    and epoch >= next_fetch and playing is None):
+                networked = True
+                try:
+                    tomorrow_ymd = local_ymd(epoch + pl.DAY_S)
+                    with DisplayPaused():
+                        tomorrow = fetch_day(tomorrow_ymd, city, country, state, method, quick=True)
+                    show_times(tiles, tomorrow[0], "Tomorrow's prayer times")  # shown now, the date changes at midnight
+                except Exception as e:
+                    logger.error(f"Tomorrow's prayer times unavailable: {e} ")
+                    show_status("Prayer times: retrying", HOLD_S)
+                    next_fetch = epoch + RETRY_AFTER_S
+
+            # Hourly clock re-sync (and daylight-saving offset refresh).
+            if epoch >= next_sync and playing is None:
+                networked = True
+                try:
+                    with DisplayPaused():
+                        refresh_clock()
+                    next_sync = time.time() + SYNC_EVERY_S
+                except Exception as e:
+                    logger.error(f"Clock sync failed, keeping the RTC time: {e} ")
+                    show_status("Clock sync: retrying", HOLD_S)
+                    next_sync = time.time() + RETRY_AFTER_S
+
+            if networked:  # requests can take a while, so read the clock again
+                epoch = time.time()
+                now_s, ymd = local_clock(epoch)
+            last_epoch = epoch
+
+            # Adhan playback ended?
+            if playing is not None and not audio.playing:
+                audio.stop()
+                playing.close()
+                playing = None
+                speaker_enable.value = False
+                logger.info("Adhan has finished. ")
+
+            if save_pending and playing is None:
+                with DisplayPaused():
+                    save_adhans(adhan_files)
+                save_pending = False
+
+            # Next prayer, its adhan and the countdown to it.
+            next_idx, prayer_s = pl.next_prayer(now_s, times, tomorrow[0] if tomorrow else None)
+            adhan_s = prayer_s - ADHAN_LEAD_S
+            previous = trigger.key
+            if trigger.update(next_idx, prayer_s, now_s):
+                if playing is None:
+                    playing = play_adhan(audio, speaker_enable, adhan_files[next_idx])
+            if trigger.changed:
+                if previous is not None and previous[0] != next_idx:
+                    logger.info(f"{pl.PRAYERS[previous[0]]} ({pl.fmt_hm(previous[1])}) has passed. ")
+                logger.info(f"RTC {pl.fmt_hm(now_s)}:{now_s % 60:02d} - next prayer is {pl.PRAYERS[next_idx]} "
+                            f"at {pl.fmt_hm(prayer_s)}, adhan at {pl.fmt_hm(adhan_s)} ")
+
+            set_text(ct_label, pl.fmt_hm(now_s), 0, 240)
+            set_text(np_name_label, pl.PRAYERS[next_idx], 240, 240)
+            set_text(np_adhan_label, pl.fmt_hm(adhan_s), 240, 240)
+            set_text(np_countdown_label, pl.fmt_countdown(adhan_s - now_s), 240, 240)
+
+            if not select_frame.hidden and epoch >= shown_until:
+                select_frame.hidden = True
+
+            if epoch >= footer_hold_until:
+                text = adhan_footer(adhan_files, shown if epoch < shown_until else next_idx, next_idx)
+                if status_label.text != text:
+                    status_label.text = text
+
+            if night_level is not None:
+                night = now_s >= times[4] + 3600 or now_s < times[0] - 3600
+                if night != dimmed:
+                    dimmed = night
+                    try:
+                        board.DISPLAY.brightness = night_level if night else 1.0
+                    except Exception as e:
+                        logger.warning(f"Cannot change the brightness: {e} ")
+                        night_level = None
+
+            if not ui_shown:  # first pass done: draw everything at once, after the startup network work
+                board.DISPLAY.root_group = splash
+                ui_shown = True
+
+            if now_s % 60 == 0:
                 clean_memory()
-                print("\n*******************************")
-                print(f"** Free memory: {mem_free()} **")
-                print("*******************************\n")
-                del today_data
-                today_data = fetch_prayer_times(date=prayers_date, country=current_ip_country, city=current_ip_city)
-                clean_memory()
-                print("\n*******************************")
-                print(f"** Free memory: {mem_free()} **")
-                print("*******************************\n")
-                today_timings = None
 
-    if next_prayer_time is not None:
-        current_time = adafruit_datetime.now().time()
-        one_day_in_seconds = 60 * 60 * 24
+        time.sleep(0.1)  # also the touch polling period
 
-        if (next_prayer == 'Fajr') and (current_time > next_prayer_time):
-            # Calculate the time until Fajr, considering it's the next day
-            section1 = one_day_in_seconds - (
-                    current_time.hour * 60 + current_time.minute) * 60 - current_time.second
-            section2 = (next_prayer_time.hour * 60 + next_prayer_time.minute) * 60
-            time_sec_until_next_prayer = section1 + section2
-        else:
-            # Calculate time until the next prayer within the same day
-            time_sec_until_next_prayer = (next_prayer_time.hour * 60 + next_prayer_time.minute) * 60 - \
-                                         (current_time.hour * 60 + current_time.minute) * 60 - current_time.second
 
-        time_sec_until_next_adhan = time_sec_until_next_prayer - (ADHAN_MINUTES_BEFORE_PRAYER * 60)  # FIXME : can be negative
-        # logger.info(f"RTC: {adafruit_datetime.now()} ")
-        # logger.info(f"Time until next adhan: {time_sec_until_next_adhan} seconds ")
-        # logger.info(f"Time until next prayer: {time_sec_until_next_prayer} seconds ")
-        # time.sleep(time_sec_until_next_adhan if time_sec_until_next_adhan > 0 else time_sec_until_next_prayer)
+# No root group is set until the interface is ready: the screen shows the CircuitPython terminal,
+# so the log lines and any startup error can be read on the PyPortal itself.
+board.DISPLAY.rotation = 0
 
-        # update next prayer countdown label
-        hours = time_sec_until_next_prayer // 3600
-        minutes = (time_sec_until_next_prayer % 3600) // 60
-        np_countdown_label.text = f"{hours:02d} h {minutes:02d} m"
-        np_countdown_label.x = 240 + (240 - np_countdown_label.bounding_box[2]) // 2
+try:
+    main()
+except Exception as error:  # last resort: show the error, then reboot
+    fatal(error)

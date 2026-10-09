@@ -3,8 +3,24 @@
 CIRCUITPY_WIFI_SSID = "your_wifi_ssid"
 CIRCUITPY_WIFI_PASSWORD = "your_wifi_password"
 
-# Optional: IANA timezone override (default: auto from IP geolocation)
+# Optional: location used for the prayer times (default: auto from IP geolocation)
+# CITY = "Montreal"
+# COUNTRY = "Canada"
+# STATE = "Quebec"
+
+# Optional: Aladhan calculation method id (default: 2, see https://aladhan.com/calculation-methods)
+# CALCULATION_METHOD = 2
+
+# Optional: IANA timezone name, only shown in the log (default: auto from IP geolocation)
 # TIMEZONE = "America/Montreal"
 
-# Optional: UTC offset in seconds if TIMEZONE is overridden (e.g. -14400 for EDT)
+# Optional: fixed UTC offset in seconds (e.g. -14400 for EDT). When set, it replaces the offset
+# detected from the IP address, which is otherwise re-checked every hour (daylight saving time).
 # UTC_OFFSET = "-14400"
+
+# Optional: dim the screen from 1 h after Isha until 1 h before Fajr (percentage, 5-100)
+# NIGHT_BRIGHTNESS = 30
+
+# Optional: also print the log to the serial console and to the terminal shown on the screen while the
+# device starts, in addition to the file on the SD card (1 = yes, 0 = no; default: 1)
+# TERMINAL_LOGS = 1
