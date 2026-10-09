@@ -1,7 +1,6 @@
 # PrayerPortal
 
-**PrayerPortal** uses the Adafruit PyPortal Titano to automatically fetch Muslim prayer times via Wi-Fi, display them on
-the device's screen, and play the Adhan (Islamic call to prayer) at the appropriate times.
+**PrayerPortal** uses the Adafruit PyPortal Titano to automatically fetch Muslim prayer times via Wi-Fi, display them on the device's screen, and play the Adhan (Islamic call to prayer) at the appropriate times.
 
 <p align="center">
   <img src="PrayerPortal.png" title="" alt="exemple" width="65%">
